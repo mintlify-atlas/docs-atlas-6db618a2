@@ -1,0 +1,102 @@
+---
+title: "Pre-warming Candle Cache for Maximum Backtest Speed"
+sidebarTitle: "Caching"
+description: "Use the --cache flag to pre-populate MongoDB with OHLCV candles for all symbols before the backtest hot loop starts, eliminating ccxt HTTP latency."
+---
+
+The hot loop in Mode A — the per-tick path that calls `listenActivePing → getPositionEntries → commitAverageBuy` — is designed to be pure CPU and local I/O. If MongoDB does not already hold the candles for the replay window, every missing tick triggers a live ccxt HTTP fetch, introducing unpredictable network latency into the innermost loop. The `--cache` flag exists to eliminate that possibility entirely: it pre-populates MongoDB with all OHLCV candles for every symbol before a single runner starts, so the hot loop never blocks on HTTP.
+
+## How `--cache` Works
+
+When `--cache` is set, `backtest.ts` awaits `CACHE_CANDLES_FN()` before the `for` loop that calls `Backtest.background()`. The function iterates every symbol in `CC_SYMBOL_LIST` and calls `cacheCandles()` for each one, using the exchange name and date range from the registered schemas:
+
+```typescript
+// packages/main/src/main/backtest.ts
+const CACHE_CANDLES_FN = async () => {
+  const [exchangeSchema] = await listExchangeSchema();
+  const [frameSchema] = await listFrameSchema();
+  for (const symbol of CC_SYMBOL_LIST) {
+    await cacheCandles({
+      exchangeName: exchangeSchema.exchangeName,
+      from: frameSchema.startDate,
+      to: frameSchema.endDate,
+      interval: "1m",
+      symbol,
+    });
+  }
+};
+```
+
+This loop is **sequential across symbols but fully awaited before any runner starts**, so the nine `Backtest.background()` calls that follow are guaranteed to find their candles already in MongoDB.
+
+## What `cacheCandles()` Does
+
+`cacheCandles` is exported from `backtest-kit`. Internally it:
+
+<Steps>
+  <Step title="Fetches OHLCV from ccxt">
+    Opens a connection to the exchange identified by `exchangeName` and pages through the OHLCV endpoint for the given symbol, interval, and date range. Each page is a batch of candles returned by the exchange's REST API.
+  </Step>
+  <Step title="Stores candles via CandleDbService">
+    Each candle batch is written to MongoDB through `CandleDbService.create()`, which uses a `findOneAndUpdate` with `$setOnInsert` and `upsert: true`. The upsert means that re-running `--cache` after a partial fill or after the date range has been extended is safe — no duplicate documents are created.
+  </Step>
+  <Step title="Returns without blocking the runners">
+    Once all pages for a symbol have been flushed to MongoDB, `cacheCandles` resolves. The outer loop in `CACHE_CANDLES_FN` then moves to the next symbol.
+  </Step>
+</Steps>
+
+## Idempotent Upserts
+
+The compound unique index on `(symbol, interval, timestamp)` is what makes the upsert strategy safe under repeated runs:
+
+```typescript
+// Conceptual schema — compound unique index enforced at the MongoDB layer
+CandleModel.index({ symbol: 1, interval: 1, timestamp: 1 }, { unique: true });
+```
+
+A `$setOnInsert` upsert only writes the document body when the document does not already exist. If it does exist (i.e., the candle was written on a previous `--cache` run), the operation is a no-op at the application layer — MongoDB acknowledges the update without modifying any field. There is no read-modify-write cycle, no E11000 duplicate-key error loop, and no need for application-side deduplication.
+
+## The Redis Cache Layer
+
+After `CandleDbService` has written candles to MongoDB, subsequent reads during the hot loop pass through a Redis cache layer before reaching Mongo. `BaseMap` stores lookup results keyed by context string:
+
+<Accordion title="BaseMap lookup flow">
+  1. The hot loop requests a candle by `(symbol, interval, timestamp)` context key.
+  2. `BaseMap` issues a Redis `GET` for the serialised key. On a warm cache this is a single round-trip to `localhost:6379` — O(1), sub-millisecond.
+  3. On a cache miss, `BaseMap` falls back to a MongoDB query, writes the result back to Redis, and returns the document.
+  4. All nine symbol contexts share the same `ioredis` client instance — no per-symbol connection overhead.
+</Accordion>
+
+The Redis key is a plain string (no JSON parse on the hot path). TTL is `-1` (no expiry) for candle data, which is immutable once written.
+
+## `--cache` vs `--noCache`
+
+| Scenario | Recommended flag | Reason |
+|---|---|---|
+| First run against a fresh MongoDB | `--cache` | Prevents ccxt HTTP latency from dominating replay time |
+| After adding new symbols to `CC_SYMBOL_LIST` | `--cache` | New symbols have no cached candles yet |
+| After extending the backtest date range | `--cache` | New candles for the extended window are not yet in MongoDB |
+| Benchmarking throughput | `--cache` | Ensures measured speed reflects the hot loop, not HTTP fetch overhead |
+| Testing candle fetch logic | `--noCache` | Forces every tick through the ccxt fetch path for debugging |
+| Working with the latest live data | `--noCache` | Fetches candles from the exchange in real time rather than reading a cached snapshot |
+
+<Warning>
+  Running without `--cache` (or with `--noCache`) on a fresh MongoDB will trigger a live ccxt HTTP request for every candle tick that is not already in the database. Depending on exchange rate limits and network conditions, this can reduce replay speed from the measured ~6 326× aggregate down to single-digit or even sub-1× real-time. Always use `--cache` for benchmarking and production parallel runs.
+</Warning>
+
+## Persistence Adapter Matrix
+
+The subsystem that benefits most from caching is the candle layer, but it is worth understanding the full adapter configuration to know where data lands in each mode. The table below reflects `config/setup.config.ts`:
+
+| Subsystem | Live mode | Backtest mode |
+|---|---|---|
+| Session | Persist (Mongo) | Local file |
+| Storage | Persist (Mongo) | Memory |
+| Recent | Persist (Mongo) | Memory |
+| Notification | Persist (Mongo) | Memory |
+| Memory | Persist (Mongo) | Local file |
+| State | Persist (Mongo) | Local file |
+| Markdown | Dummy (no-op) | Dummy (no-op) |
+| Log | JSONL | JSONL |
+
+Backtest mode intentionally uses in-memory or local-file adapters for transient state (storage, recent, notification) because replay data is ephemeral — it does not need Mongo's durability guarantees. Candles are the one backtest subsystem that benefits from MongoDB persistence (and the Redis layer on top), because they are immutable facts that can be shared across runs rather than recomputed on every backtest.

@@ -1,0 +1,133 @@
+---
+title: "CLI Flags Reference for backtest-monorepo-parallel"
+sidebarTitle: "CLI Flags"
+description: "Reference for CLI flags parsed by getArgs() — entry, backtest, live, paper, session, cache — with types, defaults, and a mode compatibility matrix."
+---
+
+All CLI flags are parsed by Node's built-in `parseArgs` from the `util` module. The result is memoized with `singleshot` from `functools-kit` so `getArgs()` can be called from any module without re-parsing `process.argv`. The helper lives at `packages/main/src/helpers/getArgs.ts` and is consumed by every entry-point module in `packages/main/src/main/`.
+
+## getArgs() Source
+
+```typescript
+// packages/main/src/helpers/getArgs.ts
+import { singleshot } from "functools-kit";
+import { parseArgs } from "util";
+
+export const getArgs = singleshot(() => {
+  const { values } = parseArgs({
+    args: process.argv,
+    options: {
+      entry: {
+        type: "boolean",
+        default: false,
+      },
+      backtest: {
+        type: "boolean",
+        default: false,
+      },
+      live: {
+        type: "boolean",
+        default: false,
+      },
+      paper: {
+        type: "boolean",
+        default: false,
+      },
+      session: {
+        type: "boolean",
+        default: false,
+      },
+      cache: {
+        type: "boolean",
+        default: false,
+      },
+    },
+    strict: false,
+    allowPositionals: true,
+  });
+  return { values };
+});
+```
+
+---
+
+## Flag Reference
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--entry` | `boolean` | `false` | Activates Mode A: enables the `CC_SYMBOL_LIST` loop in the active mode module |
+| `--backtest` | `boolean` | `false` | Activates the backtest mode (replay historical candles) |
+| `--live` | `boolean` | `false` | Activates live trading mode against a real exchange |
+| `--paper` | `boolean` | `false` | Activates paper trading mode (live data, simulated fills) |
+| `--session` | `boolean` | `false` | Runs Telegram MTProto auth and saves the session string to `./session.txt` |
+| `--cache` | `boolean` | `false` | Pre-warms MongoDB with OHLCV candles before the backtest symbol loop starts |
+
+<Note>
+  All flags default to `false`. Passing a flag without a value (e.g. `--entry`) sets it to `true`. Because `strict: false` is set, unknown flags are silently ignored rather than throwing.
+</Note>
+
+---
+
+## Mode Compatibility Matrix
+
+| Mode | `--entry` | `--backtest` | `--live` | `--paper` | `--session` | `--cache` |
+|---|---|---|---|---|---|---|
+| Parallel backtest | ✓ required | ✓ required | — | — | — | optional |
+| Single backtest (Mode B) | — | ✓ required | — | — | — | — |
+| Live trading | ✓ required | — | ✓ required | — | — | — |
+| Paper trading | ✓ required | — | — | ✓ required | — | — |
+| Telegram auth | — | — | — | — | ✓ required | — |
+
+<Tip>
+  **Mode A vs Mode B** — adding `--entry` switches from single-symbol mode (the strategy file receives one symbol directly) to the parallel loop where every symbol in `CC_SYMBOL_LIST` gets its own background worker. Omitting `--entry` with `--backtest` still works — `backtest.ts` returns early, and the strategy file itself is responsible for invoking the backtest.
+</Tip>
+
+---
+
+## Example Commands
+
+**Parallel backtest (all symbols, no cache pre-warm)**
+
+```bash
+npm start -- path/to/strategy.ts --entry --backtest
+```
+
+**Parallel backtest with MongoDB candle cache**
+
+```bash
+npm start -- path/to/strategy.ts --entry --backtest --cache
+```
+
+**Single-symbol backtest (Mode B — strategy controls the symbol)**
+
+```bash
+npm start -- path/to/strategy.ts --backtest
+```
+
+**Live trading across all symbols**
+
+```bash
+npm start -- path/to/strategy.ts --entry --live
+```
+
+**Paper trading across all symbols**
+
+```bash
+npm start -- path/to/strategy.ts --entry --paper
+```
+
+**Telegram session authentication**
+
+```bash
+npm start -- --session
+```
+
+---
+
+## Positional Arguments and the Strategy File Path
+
+`parseArgs` is configured with `allowPositionals: true`, which means anything on the command line that is not a `--flag` is collected as a positional. The strategy file path (e.g. `path/to/strategy.ts`) is passed as the first positional argument.
+
+<Note>
+  `getArgs()` itself does **not** read or process the positional arguments — it only exposes the boolean flags through `values`. The strategy file path is handled upstream by `@backtest-kit/cli` (the `npm start` entry point), which loads and executes the file before any entry-point module sees the parsed flags.
+</Note>

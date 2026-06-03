@@ -1,0 +1,262 @@
+---
+title: "BaseCRUD: Mongoose CRUD Factory for @pro/core Services"
+sidebarTitle: "BaseCRUD"
+description: "API reference for BaseCRUD — a di-factory that wraps any Mongoose Model with create, update, findById, findByFilter, findAll, iterate, and paginate."
+---
+
+`BaseCRUD` is exported from `packages/core/src/lib/common/BaseCRUD.ts` and serves as the base class for all database services in `@pro/core`. It uses `di-factory`'s `factory()` helper to produce a mixin class that accepts any Mongoose `Model` and exposes a standard set of CRUD operations, all instrumented with `LoggerService` and normalised through `readTransform`.
+
+## Constructor
+
+```typescript
+BaseCRUD(TargetModel: Model<any>)
+```
+
+Extend `BaseCRUD` by calling it as a function with your Mongoose model:
+
+```typescript
+import BaseCRUD from "@pro/core/lib/common/BaseCRUD";
+import { MyModel } from "../schema/My.schema";
+
+class MyDbService extends BaseCRUD(MyModel) {
+  // additional domain-specific methods go here
+}
+```
+
+<ParamField path="TargetModel" type="Model<any>" required>
+  Any Mongoose model. The model's `modelName` is used in log messages to identify which collection is being operated on.
+</ParamField>
+
+---
+
+## Methods
+
+### create()
+
+```typescript
+async create(dto: object): Promise<object>
+```
+
+Creates a new document in the collection. Logs the call with `loggerService.info`, then calls `TargetModel.create(dto)` and returns the plain-object representation via `readTransform`.
+
+<ParamField path="dto" type="object" required>
+  The document payload. Must conform to the model's schema.
+</ParamField>
+
+**Returns** the saved document as a plain object with `id` (not `_id`) and no internal Mongoose fields.
+
+---
+
+### update()
+
+```typescript
+async update(id: string, dto: object): Promise<object>
+```
+
+Updates an existing document by `_id` using `findByIdAndUpdate` with `{ new: true, runValidators: true }`. The `id` field is stripped from `dto` before the update to prevent accidental overwrites.
+
+<ParamField path="id" type="string" required>
+  The MongoDB `_id` of the document to update.
+</ParamField>
+
+<ParamField path="dto" type="object" required>
+  Partial update payload. The `id` key is omitted automatically via `lodash.omit`.
+</ParamField>
+
+**Returns** the updated document as a plain object.
+
+**Throws** `Error: <ModelName> not found` if no document matches the given `id`.
+
+---
+
+### findById()
+
+```typescript
+async findById(id: string): Promise<object>
+```
+
+Retrieves a single document by its `_id`.
+
+<ParamField path="id" type="string" required>
+  The MongoDB `_id` string to look up.
+</ParamField>
+
+**Returns** the matching document as a plain object.
+
+**Throws** `Error: <ModelName> not found` if the document does not exist.
+
+---
+
+### findByFilter()
+
+```typescript
+async findByFilter(filterData: object, sort?: object): Promise<object | null>
+```
+
+Finds the first document matching `filterData`. Wraps Mongoose `findOne`.
+
+<ParamField path="filterData" type="object" required>
+  A Mongoose query filter (e.g. `{ symbol: "BTCUSDT", interval: "1h" }`).
+</ParamField>
+
+<ParamField path="sort" type="object">
+  Optional sort spec (e.g. `{ date: -1 }`). Passed directly to Mongoose.
+</ParamField>
+
+**Returns** the first matching document as a plain object, or `null` if nothing matches.
+
+---
+
+### findAll()
+
+```typescript
+async findAll(filterData?: object, limit?: number): Promise<object[]>
+```
+
+Returns up to `FIND_ALL_LIMIT` (1 000) documents sorted by `date` descending.
+
+<ParamField path="filterData" type="object">
+  Optional Mongoose query filter. Defaults to `{}` (all documents).
+</ParamField>
+
+<ParamField path="limit" type="number">
+  Maximum number of documents to return. Defaults to `1000`.
+</ParamField>
+
+**Returns** an array of plain objects sorted newest-first.
+
+<Warning>
+  `FIND_ALL_LIMIT` is hard-coded at 1 000. For collections that may exceed this, use `iterate()` or `paginate()` instead.
+</Warning>
+
+---
+
+### iterate()
+
+```typescript
+async *iterate(filterData?: object, sort?: object): AsyncGenerator<object>
+```
+
+An async generator that yields documents one at a time using Mongoose's cursor-based `find`. Memory-efficient for large collections because it does not load the full result set into memory.
+
+<ParamField path="filterData" type="object">
+  Optional Mongoose query filter. Defaults to `{}`.
+</ParamField>
+
+<ParamField path="sort" type="object">
+  Optional sort spec.
+</ParamField>
+
+**Yields** one plain object per document.
+
+```typescript
+for await (const candle of core.candleDbService.iterate({ symbol: "ETHUSDT" })) {
+  // process one candle at a time
+}
+```
+
+---
+
+### paginate()
+
+```typescript
+async paginate(
+  filterData: object,
+  pagination: { limit: number; offset: number },
+  sort?: object
+): Promise<{ rows: object[]; total: number }>
+```
+
+Returns a page of results alongside the total document count — designed for paginated API responses and UI tables.
+
+<ParamField path="filterData" type="object" required>
+  Mongoose query filter applied to both the page query and the `countDocuments` call.
+</ParamField>
+
+<ParamField path="pagination" type="object" required>
+  <Expandable title="pagination fields">
+    <ParamField path="pagination.limit" type="number" required>
+      Maximum number of documents to return in this page.
+    </ParamField>
+    <ParamField path="pagination.offset" type="number" required>
+      Number of documents to skip (i.e., `page * limit`).
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="sort" type="object">
+  Optional sort spec.
+</ParamField>
+
+**Returns**
+
+<ResponseField name="rows" type="object[]">
+  The current page of plain-object documents.
+</ResponseField>
+
+<ResponseField name="total" type="number">
+  Total number of documents matching `filterData`, regardless of pagination.
+</ResponseField>
+
+---
+
+## Concrete Example: CandleDbService
+
+`CandleDbService` extends `BaseCRUD(CandleModel)` and overrides `create()` to perform an atomic upsert — preventing duplicate candles for the same symbol/interval/timestamp combination:
+
+```typescript
+export class CandleDbService extends BaseCRUD(CandleModel) {
+  readonly loggerService = inject<LoggerService>(TYPES.loggerService);
+
+  public create = async (dto: ICandleDto): Promise<ICandleRow> => {
+    this.loggerService.log("candleDbService create", { dto });
+
+    const filter = {
+      symbol:    dto.symbol,
+      interval:  dto.interval,
+      timestamp: dto.timestamp,
+    };
+    const insertOnly = {
+      exchangeName: EXCHANGE_NAME,
+      open:   dto.open,
+      high:   dto.high,
+      low:    dto.low,
+      close:  dto.close,
+      volume: dto.volume,
+    };
+
+    const document = await CandleModel.findOneAndUpdate(
+      filter,
+      { $setOnInsert: insertOnly },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+
+    return readTransform(document.toJSON()) as unknown as ICandleRow;
+  };
+
+  public hasCandle = async (
+    symbol: string,
+    interval: CandleInterval,
+    timestamp: number,
+  ): Promise<boolean> => {
+    const candle = await this.findBySymbolIntervalTimestamp(symbol, interval, timestamp);
+    return !!candle;
+  };
+
+  public findBySymbolIntervalTimestamp = async (
+    symbol: string,
+    interval: CandleInterval,
+    timestamp: number,
+  ): Promise<ICandleRow | null> => {
+    return super.findByFilter({ symbol, interval, exchangeName: EXCHANGE_NAME, timestamp });
+  };
+}
+```
+
+The `$setOnInsert` operator means the document fields are only written on a true insert — if a matching candle already exists, the operation is a no-op.
+
+---
+
+<Note>
+  `readTransform` converts Mongoose documents to plain objects: it renames `_id` to `id` and strips internal Mongoose metadata fields such as `__v`. All methods in `BaseCRUD` run their return values through this transform automatically.
+</Note>

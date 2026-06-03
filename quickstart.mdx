@@ -1,47 +1,183 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with backtest-monorepo-parallel"
+sidebarTitle: "Quickstart"
+description: "Stand up MongoDB and Redis, build the monorepo packages, and run a parallel 9-symbol backtest in under five minutes on any developer machine."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+This guide walks you from a fresh clone to a running parallel backtest across all nine default symbols. The entire sequence takes under five minutes on a machine that already has Docker installed. All commands assume the repository root as the working directory.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+### Verify Prerequisites
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+Before you begin, confirm that the following tools are available on your machine:
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
+- **Node.js 18+** — required for `parseArgs` (built-in `util` module) and ESM support used by `@backtest-kit/cli`
+- **Docker or Docker Compose** — used to run MongoDB and Redis locally
+- **TypeScript 5.0+** — listed as a peer dependency in `package.json`
+
+```bash
+node --version   # must be v18.0.0 or higher
+docker --version
+tsc --version    # must be 5.0.0 or higher
+```
+
+### Clone the Repository
+
+```bash
+git clone https://github.com/theonetrade/backtest-monorepo-parallel.git
+cd backtest-monorepo-parallel
+```
+
+### Install Dependencies
+
+Install all root-level and workspace-level dependencies with a single command. npm workspaces will hoist shared packages and link `@pro/core` and `@pro/main` correctly.
+
+```bash
+npm install
+```
+
+### Start MongoDB
+
+The repository ships a ready-made Docker Compose file for MongoDB. This starts a standalone Mongo instance on the default port `27017`.
+
+```bash
+docker-compose -f docker/mongodb/docker-compose.yaml up -d
+```
+
+### Start Redis
+
+Similarly, a Redis compose file is provided. Redis runs on port `6379` and is used by `BaseMap` for O(1) per-key caching.
+
+```bash
+docker-compose -f docker/redis/docker-compose.yaml up -d
+```
+
+### Configure Environment Variables
+
+Copy the example environment file and edit it to match your local setup:
+
+```bash
+cp .env.example .env
+```
+
+The relevant variables and their defaults are:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CC_MONGO_CONNECTION_STRING` | `mongodb://localhost:27017/backtest-pro?wtimeoutMS=15000` | Mongo connection string for all `DbService` writes |
+| `CC_REDIS_HOST` | `127.0.0.1` | Redis hostname for `BaseMap` lookups |
+| `CC_REDIS_PORT` | `6379` | Redis port |
+| `CC_REDIS_USER` | `default` | Redis ACL username |
+| `CC_REDIS_PASSWORD` | `mysecurepassword` | Redis ACL password |
+| `CC_SYMBOL_LIST` | `BTCUSDT,POLUSDT,ZECUSDT,HYPEUSDT,XAUTUSDT,DOGEUSDT,SOLUSDT,PENGUUSDT,HBARUSDT` | Comma-separated list of symbols for the parallel Mode A runner |
+
+If you used the included Docker Compose files without modification, the defaults will work as-is.
+
+### Build All Packages
+
+The monorepo uses Rollup to build each package in `./packages/*` into a CommonJS bundle and a rolled-up type declaration file. Run the build for your platform:
+
+<CodeGroup>
+```bash Linux / macOS
+npm run build
+```
+
+```bat Windows
+npm run build:win
+```
+</CodeGroup>
+
+Under the hood, `npm run build` calls `dotenv -e .env -- ./scripts/linux/build.sh`, which iterates every directory under `packages/` and runs `npm run build` inside each:
+
+```bash
+#!/bin/bash
+cd packages
+for D in `find . -maxdepth 1 -not -path "." -not -path "./.*" -type d`
+do
+    cd $D
+    npm install
+    npm run build
+    cd ..
+done
+cd ..
+```
+
+Each successful build emits two artifacts per package:
+
+- `packages/<pkg>/build/index.cjs` — the CommonJS bundle loaded at runtime via `config/alias.config.ts`
+- `packages/<pkg>/types.d.ts` — the rolled-up `.d.ts` bundle resolved at compile time via `tsconfig.json` `paths`
+
+### Run the Parallel Backtest (Mode A)
+
+With infrastructure running and packages built, launch the parallel 9-symbol backtest using Mode A with the `--cache` flag to pre-warm all candles before the runners start:
+
+```bash
+npm run start -- --backtest --entry --ui --cache \
+  ./content/apr_2026.strategy/apr_2026.strategy.ts
+```
+
+**Flag reference:**
+
+| Flag | Effect |
+|---|---|
+| `--backtest` | Activates backtest mode in `@pro/main`; without it every mode handler early-returns |
+| `--entry` | Activates the parallel entry gate in `packages/main/src/main/backtest.ts` that iterates `CC_SYMBOL_LIST` and calls `Backtest.background(symbol, …)` for each |
+| `--ui` | Starts the `@backtest-kit/ui` web dashboard on port `60050` |
+| `--cache` | Calls `cacheCandles(…)` for every symbol before the runners start, so the inner loop never blocks on ccxt HTTP |
+
+<Note>
+  The `--ui` flag starts the optional `@backtest-kit/ui` web dashboard at
+  `http://localhost:60050`. You can open it in any browser while the backtest
+  is running to inspect positions, equity curves, and per-symbol activity in
+  real time.
+</Note>
+
+<Warning>
+  Omitting `--cache` on the first run means the inner loop will call ccxt
+  over HTTP to fetch 1-minute candles for each symbol as they are needed.
+  This is significantly slower than the cached path — expect the throughput
+  to drop from ~103 events/sec to a rate limited by your internet connection
+  and exchange API rate limits.
+</Warning>
+
+### Observe the Output
+
+Once all nine `Backtest.background(...)` calls are dispatched, the strategy file begins printing progress to the console. You should see output resembling:
+
+```
+active BTCUSDT backtest=1775001720000 now=1779292949309
+active SOLUSDT backtest=1775001720000 now=1779292949415
+active DOGEUSDT backtest=1775001720000 now=1779292949521
+active HBARUSDT backtest=1775001720000 now=1779292949633
+...
+```
+
+Each line is one `listenActivePing` event from a symbol runner. Across the full captured run, **297 events fire across 9 symbols in ~2.9 seconds** — an aggregate throughput of approximately **103 events/sec** and **≈ 6 326× real-time** replay speed.
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Running Mode B (Single-Symbol)
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+If you want to run a single-strategy backtest without the parallel entry gate — letting `@backtest-kit/cli` manage the symbol dispatch — omit `--entry`:
+
+```bash
+npm run start -- --backtest --ui \
+  ./content/apr_2026.strategy/apr_2026.strategy.ts
+```
+
+Without `--entry`, `packages/main/src/main/backtest.ts` early-returns and the bundled CLI takes over: it loads the strategy file, calls schemas registered inside it, and runs a single backtest on whatever symbol the strategy itself declares.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="building" href="/architecture">
+    Understand how the two packages are wired together, how
+    `globalThis.core` is set up, and how config files bootstrap the
+    runtime without bundler hooks.
+  </Card>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Read the full feature overview, performance table, and explanation
+    of why the system is as fast as it is.
+  </Card>
+</CardGroup>

@@ -1,0 +1,245 @@
+---
+title: "Adding a Redis-Cached Lookup with BaseMap"
+sidebarTitle: "Redis Cache"
+description: "Extend BaseMap to create a typed, TTL-aware Redis key-value store for O(1) lookups, replacing expensive MongoDB queries in hot backtest paths."
+---
+
+`BaseMap` wraps `ioredis` with a namespaced key pattern and an optional TTL, giving you a production-safe Redis key-value store in one class extension. All keys are stored as `<connectionKey>:<key>`, so multiple `BaseMap` instances never collide in the same Redis database. Extending it takes one class and one DI registration — no Redis configuration changes required.
+
+## Constructor signature
+
+```typescript
+BaseMap(connectionKey: string, ttlExpireSeconds: number = 300)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `connectionKey` | `string` | Namespace prefix for all keys in this map. Keys are stored as `<connectionKey>:<key>`. |
+| `ttlExpireSeconds` | `number` | Seconds before each key expires. Pass `-1` for no expiry. Defaults to `300` (5 minutes). |
+
+## Creating a cache service
+
+Extend `BaseMap` with your chosen namespace and TTL. The `di-factory` `factory()` wrapper used internally by `BaseMap` means your subclass participates in the same lazy-injection lifecycle as every other `@pro/core` service:
+
+```typescript
+// packages/core/src/lib/services/cache/PriceAlertCacheService.ts
+import BaseMap from "../../common/BaseMap";
+
+// Keys stored as "price-alerts:<key>", expire after 5 minutes
+export class PriceAlertCacheService extends BaseMap("price-alerts", 300) {
+  // All BaseMap methods are available immediately.
+  // Add domain-specific helpers here as needed.
+  public setAlert = async (symbol: string, price: number): Promise<void> => {
+    await this.set(symbol, String(price));
+  };
+
+  public getAlert = async (symbol: string): Promise<number | null> => {
+    const value = await this.get(symbol);
+    return value !== null ? parseFloat(value as string) : null;
+  };
+}
+
+export default PriceAlertCacheService;
+```
+
+For a permanent cache (candle data, reference data that never expires), pass `-1`:
+
+```typescript
+export class CandleCacheService extends BaseMap("candles", -1) {}
+```
+
+## Available methods
+
+Every class that extends `BaseMap` inherits the following methods. All methods operate exclusively on keys within the `connectionKey` namespace — they never touch keys belonging to other `BaseMap` instances.
+
+<Accordion title="set(key, value) — store a value">
+
+```typescript
+async set(key: string, value: unknown): Promise<void>
+```
+
+Stores `value` under `<connectionKey>:<key>`. If `ttlExpireSeconds` is not `-1`, a Redis `EXPIRE` is set immediately after the write. Throws if `key` is an empty string.
+
+```typescript
+await cache.set("BTCUSDT", "70000");
+```
+
+</Accordion>
+
+<Accordion title="get(key) — retrieve a value">
+
+```typescript
+async get(key: string | null): Promise<unknown | null>
+```
+
+Returns the stored value, or `null` if the key does not exist or `key` is `null`. Values are returned as strings — deserialize as needed.
+
+```typescript
+const price = await cache.get("BTCUSDT"); // "70000" | null
+```
+
+</Accordion>
+
+<Accordion title="delete(key) — remove a key">
+
+```typescript
+async delete(key: string): Promise<void>
+```
+
+Removes `<connectionKey>:<key>` from Redis. A no-op if the key does not exist.
+
+```typescript
+await cache.delete("BTCUSDT");
+```
+
+</Accordion>
+
+<Accordion title="has(key) — check existence">
+
+```typescript
+async has(key: string): Promise<boolean>
+```
+
+Returns `true` if the key exists (and has not expired), `false` otherwise.
+
+```typescript
+if (await cache.has("BTCUSDT")) { /* ... */ }
+```
+
+</Accordion>
+
+<Accordion title="clear() — remove all keys in the namespace">
+
+```typescript
+async clear(): Promise<void>
+```
+
+Removes every key matching `<connectionKey>:*` using a SCAN loop. Safe for large keyspaces — never calls `FLUSHALL` or `FLUSHDB`.
+
+```typescript
+await cache.clear();
+```
+
+</Accordion>
+
+<Accordion title="toArray() — snapshot all key-value pairs">
+
+```typescript
+async toArray(): Promise<[string, unknown][]>
+```
+
+Returns all `[key, value]` pairs in the namespace as an in-memory array. Keys have the namespace prefix stripped — you get back `"BTCUSDT"`, not `"price-alerts:BTCUSDT"`.
+
+```typescript
+const all = await cache.toArray();
+// [["BTCUSDT", "70000"], ["ETHUSDT", "3500"], ...]
+```
+
+</Accordion>
+
+<Accordion title="iterate() — async iteration over key-value pairs">
+
+```typescript
+async *iterate(): AsyncIterableIterator<readonly [string, unknown]>
+```
+
+Yields `[key, value]` pairs one batch at a time (batch size: 100). Use this instead of `toArray()` when the namespace may contain thousands of keys.
+
+```typescript
+for await (const [symbol, price] of cache.iterate()) {
+  console.log(symbol, price);
+}
+```
+
+</Accordion>
+
+<Accordion title="keys() — async iteration over keys only">
+
+```typescript
+async *keys(): AsyncIterableIterator<string>
+```
+
+Yields each key in the namespace with the prefix stripped.
+
+```typescript
+for await (const symbol of cache.keys()) {
+  console.log(symbol);
+}
+```
+
+</Accordion>
+
+<Accordion title="values() — async iteration over values only">
+
+```typescript
+async *values(): AsyncIterableIterator<unknown>
+```
+
+Yields each value in the namespace.
+
+```typescript
+for await (const price of cache.values()) {
+  console.log(price);
+}
+```
+
+</Accordion>
+
+<Accordion title="size() — count keys in the namespace">
+
+```typescript
+async size(): Promise<number>
+```
+
+Returns the number of keys currently in the namespace. Uses a SCAN loop — does not block Redis.
+
+```typescript
+const count = await cache.size(); // 9
+```
+
+</Accordion>
+
+## SCAN-based iteration
+
+All iteration methods — `clear()`, `toArray()`, `iterate()`, `keys()`, `values()`, and `size()` — use a `SCAN` cursor loop with a batch size of `100` (the `ITERATOR_BATCH_SIZE` constant in `BaseMap.ts`). This means:
+
+- They **never block** the Redis event loop, even against keyspaces with millions of keys.
+- They are safe to call concurrently from multiple async contexts (the 9 parallel symbol runners all share the same `ioredis` client).
+- Each batch issues one `SCAN` command and one `MGET` for the found keys — no per-key round-trips.
+
+## Redis connection
+
+`BaseMap` obtains its `ioredis` client by calling `getRedis()` from `@backtest-kit/mongo`. This returns the shared Redis client configured via environment variables:
+
+```bash
+CC_REDIS_HOST=127.0.0.1
+CC_REDIS_PORT=6379
+CC_REDIS_USER=default
+CC_REDIS_PASSWORD=mysecurepassword
+```
+
+No additional Redis setup is required when you add a new `BaseMap` subclass — it reuses the same connection pool.
+
+## Registering the cache service
+
+Follow the five-step DI registration recipe from [Adding a New Service](/guides/adding-services):
+
+1. The service file already exists from the step above.
+2. Add `priceAlertCacheService: Symbol('priceAlertCacheService')` to `types.ts`.
+3. Add `provide(TYPES.priceAlertCacheService, () => new PriceAlertCacheService())` to `provide.ts`.
+4. Add `priceAlertCacheService: inject<PriceAlertCacheService>(TYPES.priceAlertCacheService)` to `ioc` in `lib/index.ts`.
+5. Run `npm run build`.
+
+After the build, `core.priceAlertCacheService` is globally typed and accessible from strategy files:
+
+```typescript
+// content/my.strategy/my.strategy.ts
+const cached = await core.priceAlertCacheService.getAlert("BTCUSDT");
+if (!cached) {
+  await core.priceAlertCacheService.setAlert("BTCUSDT", currentPrice);
+}
+```
+
+<Note>
+  Pass `-1` as `ttlExpireSeconds` for permanent cache entries — for example, candle data that has been pre-warmed with `--cache` and should not expire mid-run. Pass a positive number for volatile data like current prices, session state, or any value that must be refreshed on a schedule.
+</Note>

@@ -1,0 +1,212 @@
+---
+title: "Strategy Event Hooks: listenActivePing and listenError"
+sidebarTitle: "Signal Events"
+description: "Use listenActivePing to react to every active position tick and listenError for global error handling inside a backtest-kit strategy file."
+---
+
+Event hooks let your strategy react to the backtest engine's tick cycle without polling. Instead of checking state on every candle yourself, you register listeners once at module load time, and backtest-kit calls them at the right moment — when a position is active, or when an error escapes a strategy callback. The result is a clean, concern-separated strategy body where each listener handles exactly one responsibility.
+
+## listenActivePing
+
+`listenActivePing(callback)` registers a function that the engine calls on **every tick where the symbol has an active open position**. You can register as many listeners as you like; they run in registration order for every active-position tick.
+
+### Callback Signature
+
+```typescript
+listenActivePing(async ({ symbol, currentPrice, data, timestamp }) => {
+  // your handler
+});
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `symbol` | `string` | Trading pair e.g. `"BTCUSDT"` |
+| `currentPrice` | `number` | Close price of the current 1-minute candle |
+| `data` | `Record<string, unknown>` | Arbitrary metadata stored on the position |
+| `timestamp` | `number` | Current backtest time as Unix milliseconds |
+
+### Handler 1 — DCA Laddering
+
+The first listener from `apr_2026.strategy.ts` implements a dollar-cost averaging ladder. It checks the current ladder depth, verifies price hasn't overlapped an existing entry zone, and places a new buy if both guards pass:
+
+```typescript
+listenActivePing(async ({ symbol, currentPrice }) => {
+  // Guard 1: cap ladder depth
+  const { length: steps } = await getPositionEntries(symbol);
+  if (steps >= LADDER_MAX_STEPS) {
+    return;
+  }
+
+  // Guard 2: avoid buying into an existing entry zone
+  const hasOverlap = await getPositionEntryOverlap(symbol, currentPrice, {
+    upperPercent: LADDER_UPPER_STEP,
+    lowerPercent: LADDER_LOWER_STEP,
+  });
+  if (hasOverlap) {
+    return;
+  }
+
+  // Place the next DCA buy
+  await commitAverageBuy(symbol, LADDER_STEP_COST);
+});
+```
+
+The `LADDER_UPPER_STEP: 5` / `LADDER_LOWER_STEP: 1` window means the engine skips a new buy if `currentPrice` is within 5% above **or** 1% below any existing entry. This prevents buying the same price zone twice while still allowing buys when price dips meaningfully.
+
+### Handler 2 — Profit-Taking Exit
+
+The second listener monitors unrealised PnL and closes the position once it crosses `TARGET_PROFIT`:
+
+```typescript
+listenActivePing(async ({ symbol, data, timestamp }) => {
+  console.log("active", symbol, timestamp);
+
+  const currentProfit = await getPositionPnlPercent(symbol);
+  if (currentProfit < TARGET_PROFIT) {
+    return;
+  }
+
+  Log.info("position closed due to the target pnl reached", {
+    symbol,
+    data,
+  });
+
+  await commitClosePending(symbol, {
+    id: "unknown",
+    note: str.newline(
+      "# Позиция закрыта по target pnl",
+    ),
+  });
+});
+```
+
+`commitClosePending` closes the position and writes the Markdown `note` into the JSONL log record, making it easy to filter closed-by-profit entries when analysing results.
+
+<Note>
+  Multiple `listenActivePing` handlers stack — register as many as your strategy needs, each focused on a single concern (laddering, profit-taking, stop management, trailing stop, etc.). They all run on every active-position tick in the order they were registered.
+</Note>
+
+## listenError
+
+`listenError(callback)` registers a global error sink. It is called when any unhandled error escapes a strategy callback — including errors thrown inside `getSignal` or any `listenActivePing` handler.
+
+```typescript
+listenError((error) => {
+  console.log(error);
+  Log.debug("error", {
+    error: errorData(error),
+    message: getErrorMessage(error),
+  });
+});
+```
+
+`errorData` from `functools-kit` serializes the error object into a plain `Record<string, unknown>` safe for JSONL output. `getErrorMessage` extracts the human-readable message string. Together they ensure every error is captured in the structured log even if the original `Error` object contains non-serializable properties.
+
+## Helper Function Reference
+
+<Accordion title="getPositionEntries(symbol)">
+Returns the array of all open DCA entries for the given symbol. Each element represents one ladder step.
+
+```typescript
+const { length: steps } = await getPositionEntries(symbol);
+// steps: number of DCA buys already committed
+```
+
+Use `.length` to cap the ladder: if `steps >= LADDER_MAX_STEPS`, skip the current tick.
+</Accordion>
+
+<Accordion title="getPositionEntryOverlap(symbol, currentPrice, { upperPercent, lowerPercent })">
+Returns `true` if `currentPrice` falls within the overlap band of any existing entry. The band is `[entry × (1 - lowerPercent/100), entry × (1 + upperPercent/100)]`.
+
+```typescript
+const hasOverlap = await getPositionEntryOverlap(symbol, currentPrice, {
+  upperPercent: LADDER_UPPER_STEP,  // 5%
+  lowerPercent: LADDER_LOWER_STEP,  // 1%
+});
+```
+
+Guards against double-buying the same price zone — essential for DCA strategies where price oscillates in a tight range.
+</Accordion>
+
+<Accordion title="commitAverageBuy(symbol, cost)">
+Places a new DCA buy at `currentPrice` for `cost` USDT. The engine records this as a new entry in the position's ladder and recalculates the average entry price.
+
+```typescript
+await commitAverageBuy(symbol, LADDER_STEP_COST); // e.g. 100 USDT
+```
+
+Each call adds one step to the ladder returned by `getPositionEntries()`.
+</Accordion>
+
+<Accordion title="getPositionPnlPercent(symbol)">
+Returns the current unrealised PnL as a percentage, calculated from the weighted average entry price across all DCA steps.
+
+```typescript
+const currentProfit = await getPositionPnlPercent(symbol);
+// e.g. 3.14 → 3.14% profit
+```
+
+Negative values indicate an unrealised loss. Compare against `TARGET_PROFIT` to decide when to close.
+</Accordion>
+
+<Accordion title="commitClosePending(symbol, { id, note })">
+Closes the active position for `symbol` and records a structured note in the JSONL log. `id` is an arbitrary string identifier for the close event; `note` is a Markdown string attached to the close record.
+
+```typescript
+await commitClosePending(symbol, {
+  id: "unknown",
+  note: str.newline("# Позиция закрыта по target pnl"),
+});
+```
+
+After this call, subsequent `listenActivePing` ticks for this symbol will not fire until a new position is opened via `getSignal`.
+</Accordion>
+
+<Accordion title="Position.moonbag({ position, currentPrice, percentStopLoss })">
+Factory method that computes absolute `stopLoss` and `takeProfit` prices from a percentage distance. Returns an object that can be spread into the `getSignal` return value.
+
+```typescript
+...Position.moonbag({
+  position: "long",
+  currentPrice,
+  percentStopLoss: HARD_STOP, // 25.0
+})
+```
+
+For a `long` at price 100 with `percentStopLoss: 25`, `stopLoss` resolves to 75. The engine automatically closes the position if price reaches this level.
+</Accordion>
+
+<Accordion title="Log.info() / Log.debug()">
+Structured logging helpers that write entries into the JSONL log file. `Log.info` is for meaningful business events; `Log.debug` is for diagnostic detail (errors, verbose state).
+
+```typescript
+Log.info("position closed due to the target pnl reached", {
+  symbol,
+  data,
+});
+
+Log.debug("error", {
+  error: errorData(error),
+  message: getErrorMessage(error),
+});
+```
+
+Both methods accept a message string and an optional metadata object. Entries are written atomically and can be replayed or filtered after the backtest completes.
+</Accordion>
+
+## Execution Order Summary
+
+<Steps>
+  <Step title="getSignal fires once">
+    When the engine first encounters a symbol with no active position, it calls `getSignal(symbol, when, currentPrice)`. The returned `position`, `cost`, and stop levels open the initial entry.
+  </Step>
+  <Step title="listenActivePing fires every tick">
+    On every subsequent candle tick where the position is active, all registered `listenActivePing` handlers run in registration order. The laddering handler runs first, then the profit-taking handler.
+  </Step>
+  <Step title="Position closes">
+    Either `commitClosePending` (profit target reached), the hard stop-loss level set by `Position.moonbag()`, or `minuteEstimatedTime` expiry triggers the close. The position is removed from active state.
+  </Step>
+  <Step title="Cycle repeats">
+    On the next tick with no active position, `getSignal` fires again and the cycle restarts for the remainder of the frame window.
+  </Step>
+</Steps>

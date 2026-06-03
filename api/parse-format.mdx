@@ -1,0 +1,215 @@
+---
+title: "ParseFormat and ExtractConfig: Regex Field Mapping API"
+sidebarTitle: "Parse Format"
+description: "Reference for ParseFormat<M> and ExtractConfig — the typed regex mapping API used by ParserService.parseDay() to extract structured data from messages."
+---
+
+The parser uses a typed field mapping schema to extract structured data from freeform text. Each field in a `ParseFormat<M>` object maps to either a bare `RegExp` (extract the first capture group as a string) or a full `ExtractConfig<T>` object that adds capture group selection, type transformation, validation, optional marking, and multi-match support. `ParserService.parseDay()` applies the format to every message in a `ScraperMessage[]` array and returns a `ParserMessageRaw<M>[]` where `data` is either the fully-typed extracted object or `null`.
+
+---
+
+## ExtractConfig\<T\>
+
+`ExtractConfig<T>` is the per-field configuration object. `T` is the TypeScript type of the extracted value for that field.
+
+```typescript
+// packages/core/src/model/ParseFormat.model.ts
+export type ExtractConfig<T = string> = {
+  pattern: RegExp;
+  group?: number;
+  transform?: (raw: string, match: RegExpMatchArray) => T;
+  validate?: (value: T) => boolean;
+  multi?: boolean;
+  optional?: boolean;
+};
+```
+
+<ResponseField name="pattern" type="RegExp" required>
+  The regex applied to the message text. For single-match fields, `String.prototype.match()` is used. For `multi: true` fields, `String.prototype.matchAll()` is used — the pattern **must** have the global flag (`g`).
+</ResponseField>
+
+<ResponseField name="group" type="number">
+  Capture group index to extract from the match array. Defaults to `1`. Set to `0` to use the entire match.
+</ResponseField>
+
+<ResponseField name="transform" type="(raw: string, match: RegExpMatchArray) => T">
+  Optional transform applied to the raw capture group string. Receives the captured string as `raw` and the full `RegExpMatchArray` as `match` (useful when you need multiple groups). The return value becomes the field's typed value.
+</ResponseField>
+
+<ResponseField name="validate" type="(value: T) => boolean">
+  Optional validation function. If it returns `false` for any value (including any element of a `multi` array), the **entire message** returns `data: null` — it is treated as a non-matching message, not just a missing field.
+</ResponseField>
+
+<ResponseField name="optional" type="boolean">
+  When `true`, a missing pattern match returns `undefined` for this field rather than causing the whole message to return `data: null`. Useful for fields that are not always present in every message format.
+</ResponseField>
+
+<ResponseField name="multi" type="boolean">
+  When `true`, uses `matchAll()` to collect every occurrence of `pattern` in the message text. The field's value becomes `T[]` instead of `T`. Requires the `g` (global) flag on `pattern`.
+</ResponseField>
+
+<Warning>
+  `multi: true` fields require the `pattern` to have the global flag (`g`). If the flag is absent, `ParserService` throws at runtime: `parserService field "<key>" is multi but pattern is not global`.
+</Warning>
+
+---
+
+## ParseFormat\<M\>
+
+`ParseFormat<M>` is the top-level field mapping type. It is a mapped type over `M` where each key maps to either a bare `RegExp` or an `ExtractConfig` typed to match `M[K]`.
+
+```typescript
+// packages/core/src/model/ParseFormat.model.ts
+export type ParseFormat<T> = {
+  [K in keyof T]: RegExp | ExtractConfig<T[K] extends (infer U)[] ? U : T[K]>;
+};
+```
+
+A bare `RegExp` value is shorthand for `{ pattern: regexp }` — it extracts capture group 1 as a `string` with no transform or validation.
+
+---
+
+## ExtractedData\<M\>
+
+`ExtractedData<M>` is the inferred output type when all fields in a `FieldMapping` are successfully extracted. It respects the `multi` flag by mapping `multi: true` fields to `R[]`.
+
+```typescript
+// packages/core/src/model/ParseFormat.model.ts
+export type FieldMapping = {
+  [key: string]: RegExp | ExtractConfig<any>;
+};
+
+export type ExtractedData<M extends FieldMapping> = {
+  [K in keyof M]: M[K] extends ExtractConfig<infer R>
+    ? M[K] extends { multi: true }
+      ? R[]
+      : R
+    : M[K] extends RegExp
+      ? string
+      : never;
+};
+```
+
+---
+
+## Worked Example: SIGNAL_FORMAT
+
+`CryptoYodaScreenService` defines `SIGNAL_FORMAT` as a `ParseFormat<SignalFields>` that extracts five fields from Russian-language CryptoYoda trade signals. This is the canonical example of every `ExtractConfig` feature in use.
+
+```typescript
+// packages/core/src/lib/services/screen/CryptoYodaScreenService.ts
+
+const num = (s: string) => parseFloat(s.replace(",", "."));
+const isNum = (v: number) => Number.isFinite(v) && v > 0;
+
+type SignalFields = {
+  symbol: string;
+  direction: "short" | "long";
+  entry: { from: number; to: number };
+  targets: number[];
+  stoploss: number;
+};
+
+const SIGNAL_FORMAT: ParseFormat<SignalFields> = {
+  symbol: {
+    pattern: /#([A-Z0-9]+)\/USDT/,
+    group: 1,
+    validate: (v) => v.length > 0,
+  },
+  direction: {
+    pattern: /(ШОРТ|ЛОНГ)/i,
+    transform: (raw) => (raw.toUpperCase() === "ШОРТ" ? "short" : "long"),
+    validate: (v) => v === "short" || v === "long",
+  },
+  entry: {
+    pattern: /зоне\s+\$?([\d.,]+)\s*[-–—]\s*(?:\$?[\d.,]+\s*[-–—]\s*)?\$?([\d.,]+)(?=\s)/i,
+    transform: (_, m) => ({ from: num(m[1]), to: num(m[2]) }),
+    validate: (v) => isNum(v.from) && isNum(v.to) && v.from < v.to,
+  },
+  targets: {
+    pattern: /Закрыть(?:\s+ордер)?\s+по(?:\s+цене)?\s+\$?([\d.,]+)/gi,
+    transform: (_, m) => num(m[1]),
+    validate: (v) => isNum(v),
+    multi: true,
+  },
+  stoploss: {
+    pattern: /СТОП-?ЛОСС:\s*\$?([\d.,]+)/i,
+    transform: (_, m) => num(m[1]),
+    validate: (v) => isNum(v),
+  },
+};
+```
+
+### Field Breakdown
+
+<Accordion title="symbol — hashtag extraction">
+  ```typescript
+  symbol: {
+    pattern: /#([A-Z0-9]+)\/USDT/,
+    group: 1,
+    validate: (v) => v.length > 0,
+  }
+  ```
+  Matches a hashtag like `#BTC/USDT` and captures the base asset (`BTC`). Group `1` extracts just the symbol name without the `#` prefix or `/USDT` suffix. Validation rejects empty strings.
+</Accordion>
+
+<Accordion title="direction — Cyrillic keyword transform">
+  ```typescript
+  direction: {
+    pattern: /(ШОРТ|ЛОНГ)/i,
+    transform: (raw) => (raw.toUpperCase() === "ШОРТ" ? "short" : "long"),
+    validate: (v) => v === "short" || v === "long",
+  }
+  ```
+  Matches the Russian words for SHORT and LONG (case-insensitive). The `transform` normalizes them to the English lowercase strings `"short"` / `"long"`. No explicit `group` — defaults to group 1, which is the full keyword match.
+</Accordion>
+
+<Accordion title="entry — multi-group transform to object">
+  ```typescript
+  entry: {
+    pattern: /зоне\s+\$?([\d.,]+)\s*[-–—]\s*(?:\$?[\d.,]+\s*[-–—]\s*)?\$?([\d.,]+)(?=\s)/i,
+    transform: (_, m) => ({ from: num(m[1]), to: num(m[2]) }),
+    validate: (v) => isNum(v.from) && isNum(v.to) && v.from < v.to,
+  }
+  ```
+  Uses both capture groups (`m[1]` and `m[2]`) in the `transform` to build a `{ from, to }` range object. The `num()` helper normalizes European decimal commas to dots before `parseFloat`. Validation rejects ranges where either bound is non-finite, non-positive, or `from >= to`.
+</Accordion>
+
+<Accordion title="targets — multi: true with global flag">
+  ```typescript
+  targets: {
+    pattern: /Закрыть(?:\s+ордер)?\s+по(?:\s+цене)?\s+\$?([\d.,]+)/gi,
+    transform: (_, m) => num(m[1]),
+    validate: (v) => isNum(v),
+    multi: true,
+  }
+  ```
+  The only `multi: true` field. The pattern has the `g` flag — `matchAll()` collects every "Закрыть по цене $X" line in the message. Each match is individually transformed and validated. The result is `number[]`. If no matches are found and `optional` is not set, the message returns `data: null`.
+</Accordion>
+
+<Accordion title="stoploss — simple numeric extraction">
+  ```typescript
+  stoploss: {
+    pattern: /СТОП-?ЛОСС:\s*\$?([\d.,]+)/i,
+    transform: (_, m) => num(m[1]),
+    validate: (v) => isNum(v),
+  }
+  ```
+  Matches `СТОП-ЛОСС:` or `СТОПЛОСС:` followed by an optional `$` and a number. The `num()` helper normalizes the captured string to a JavaScript `number`.
+</Accordion>
+
+---
+
+## Extraction Logic
+
+The internal `EXTRACT_DATA_FN` in `ParserService` processes each field in order:
+
+1. Normalize the spec: bare `RegExp` values are wrapped as `{ pattern: regexp }`.
+2. For `multi: true` fields: call `matchAll(pattern)`. If no matches and not `optional`, return `null`. Apply `transform` and `validate` to each match. Store as `T[]`.
+3. For single fields: call `match(pattern)`. If no match and not `optional`, return `null`. Apply `transform` and `validate`. Store as `T`.
+4. If any field's `validate` returns `false`, return `null` for the entire message.
+5. Return the accumulated result as `ExtractedData<M>`.
+
+<Note>
+  If a field is not `optional` and its pattern doesn't match, the **entire message** returns `data: null` — not just that field. This is intentional: it filters out non-signal messages efficiently without requiring downstream null checks on individual fields.
+</Note>

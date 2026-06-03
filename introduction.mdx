@@ -1,0 +1,107 @@
+---
+title: "backtest-monorepo-parallel: Parallel Crypto Backtesting Template"
+sidebarTitle: "Introduction"
+description: "Learn what backtest-monorepo-parallel is, how it achieves 6300× real-time speed, and the core concepts behind its zero-import DI runtime."
+---
+
+**backtest-monorepo-parallel** is a TypeScript monorepo template built on top of [backtest-kit](https://github.com/tripolskypetr/backtest-kit) that runs nine cryptocurrency symbols concurrently in a single Node.js process, backed by shared MongoDB and Redis infrastructure. Its defining innovation is a **zero-import DI runtime**: strategy files placed under `./content/` can call `core.candleDbService`, `core.scraperService`, and every other workspace service at evaluation time without writing a single `import` statement, without bundler hooks, and without any changes to strategy author code.
+
+## What is backtest-monorepo-parallel?
+
+The project solves a common problem when scaling algorithmic backtesting: keeping strategy code simple and import-free while still giving it access to a rich, shared service layer. It achieves this by publishing the entire IoC container as `globalThis.core` before any strategy file is loaded. Because `@backtest-kit/cli` loads strategy files at runtime by path argument, the container is always fully initialised and globally available by the time strategy evaluation begins.
+
+<Note>
+  The `globalThis.core` binding is typed through the root `tsconfig.json`
+  `paths` configuration, which points `@pro/core` at the rolled-up
+  `types.d.ts`. This means IDEs and the TypeScript compiler see full
+  autocompletion for `core.*` even though there are no runtime imports in
+  strategy files.
+</Note>
+
+## Performance Headline
+
+At approximately **6 300× real-time aggregate speed**, a full 27-day window across all 9 symbols takes on the order of a few minutes of wall time on commodity developer hardware. The numbers below were captured on an HP Victus 15-FA1022CI laptop (Intel i5-13420H, 16 GB DDR4-3200, NVMe SSD) — not a server.
+
+| Metric | Value |
+|---|---|
+| Wall-clock span (first → last event) | **2 893 ms** (~2.9 s) |
+| Total events captured | **297** |
+| Symbols running in parallel | **9** (BTC, POL, ZEC, HYPE, XAUT, DOGE, SOL, PENGU, HBAR) |
+| Historical time advanced per symbol | **34 minutes** (2 040 000 ms) |
+| Per-symbol replay speed | 34 min ÷ 2.9 s ≈ **703× real-time** |
+| Aggregate replay speed (9 symbols) | 9 × 703 = **≈ 6 326× real-time** |
+| Event throughput | 297 ev ÷ 2.893 s = **≈ 103 events/sec** |
+| Frame coverage | `2026-04-01 → 2026-04-27` = 27 days × 1m candles = **~350 000 candle ticks** |
+
+<Tip>
+  The hot loop — `listenActivePing → getPositionEntries → commitAverageBuy`
+  — is where the 103 ev/s figure comes from. It is dominated by Mongo writes
+  and first-touch candle fetches; once the `--cache` flag pre-warms candles,
+  the inner loop runs on pure CPU and local I/O.
+</Tip>
+
+## Why So Fast?
+
+Five design choices combine to produce these numbers:
+
+1. **Single-process concurrency.** All nine `Backtest.background(...)` calls share one Node event loop, one Mongo connection pool, and one Redis pool. There is no IPC overhead, no subprocess forking.
+2. **Redis O(1) lookup cache.** Every `findByContext(...)` call hits a hot-path Redis `GET` before falling back to Mongo. Strings only — no JSON parse on the cache key.
+3. **Atomic upserts.** Every `write*Data(...)` is a single `findOneAndUpdate({ filter: uniqueIndex, $set: payload }, { upsert, new })` — no read-modify-write cycle, no application-side locks.
+4. **Candle pre-warming.** The `--cache` flag in Mode A calls `cacheCandles(...)` for every symbol before the runners start, so the inner loop never blocks on ccxt HTTP.
+5. **JIT-friendly hot path.** The per-tick strategy body is ~30 lines of synchronous arithmetic plus a handful of awaited helpers — a shape V8 inlines aggressively.
+
+## Workspace Packages
+
+The monorepo contains two npm workspace packages under `./packages/`:
+
+**`@pro/core`** is the shared service and infrastructure layer. It owns:
+- MongoDB schemas and CRUD services (`CandleDbService`, and the extension point for any new collection)
+- Redis-cached lookup maps via `BaseMap`
+- Web scraping and HTML parsing (`ScraperService`, `ParserService`)
+- Chart screen capture (`CryptoYodaScreenService`)
+- The DI container wired through `di-kit`'s `createActivator("pro")`
+- The `globalThis.core` assignment that makes the container globally accessible
+
+**`@pro/main`** is the mode-dispatcher layer. It imports `@pro/core` and registers four runtime entry points, each gated on a CLI flag:
+
+| Mode | Flag | Description |
+|---|---|---|
+| `backtest` | `--backtest --entry` | Parallel replay across all symbols in `CC_SYMBOL_LIST` |
+| `live` | `--live` | Live trading mode with Mongo-durable state |
+| `paper` | `--paper` | Paper trading mode |
+| `session` | `--session` | Telegram MTProto session initialisation via QR scan |
+
+## The Four Runtime Modes
+
+`packages/main/src/index.ts` simply imports four side-effectful modules:
+
+```typescript
+import "./main/session";
+import "./main/backtest";
+import "./main/live";
+import "./main/paper";
+```
+
+Each module calls `getArgs()` on startup and early-returns if its flag is absent. This means exactly one mode runs per process invocation, and adding a new mode is a matter of adding one file and one re-export — no routing table to update.
+
+## Content Directory
+
+Strategy files live under `./content/<name>.strategy/`. They are **never bundled into `@pro/*` packages**. Instead, `@backtest-kit/cli` loads them at runtime by the path you pass as a positional argument:
+
+```bash
+npm run start -- --backtest --entry --ui --cache \
+  ./content/apr_2026.strategy/apr_2026.strategy.ts
+```
+
+Because `globalThis.core` is populated before the CLI loads the strategy file, every service is available without imports.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Stand up MongoDB and Redis, build the packages, and run your first
+    parallel backtest in under five minutes.
+  </Card>
+  <Card title="Architecture" icon="building" href="/architecture">
+    Explore the two-package layout, the DI container wiring, and how
+    config files bootstrap the system at runtime.
+  </Card>
+</CardGroup>

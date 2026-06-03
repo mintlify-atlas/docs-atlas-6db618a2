@@ -1,0 +1,130 @@
+---
+title: "Environment Variables Reference for backtest-monorepo-parallel"
+sidebarTitle: "Environment Variables"
+description: "Complete reference for all environment variables: MongoDB connection, Redis credentials, symbol list, and Telegram API credentials with defaults and usage context."
+---
+
+All runtime configuration is driven by environment variables with sensible defaults for local development — no mandatory `.env` file is required to run against a locally started Docker stack. To override any default, copy `.env.example` to `.env` at the repository root and edit the values you need. The `npm` scripts load `.env` automatically via `dotenv-cli` (e.g. `dotenv -e .env -- node ...`).
+
+## `.env.example`
+
+The example file ships two overrides that are needed on Docker Desktop (Mac / Windows) where the Node process runs on the host and must reach containers over the `host.docker.internal` gateway:
+
+```env .env.example
+CC_REDIS_HOST=host.docker.internal
+CC_MONGO_CONNECTION_STRING=mongodb://host.docker.internal:27017/backtest-kit?wtimeoutMS=15000
+```
+
+Copy this file before your first run:
+
+```bash
+cp .env.example .env
+```
+
+## Full Variable Reference
+
+### MongoDB
+
+Defined in `packages/core/src/config/params.ts`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CC_MONGO_CONNECTION_STRING` | `mongodb://localhost:27017/backtest-pro?wtimeoutMS=15000` | Full MongoDB connection string including database name (`backtest-pro`) and write timeout (`wtimeoutMS=15000`). Passed directly to Mongoose's `connect()` call inside `setup()` from `@backtest-kit/mongo`. |
+
+### Redis
+
+Defined in `packages/core/src/config/params.ts`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CC_REDIS_HOST` | `127.0.0.1` | Redis server hostname. Change to `host.docker.internal` on Docker Desktop (Mac / Windows). |
+| `CC_REDIS_PORT` | `6379` | Redis server port. Must match the `ports` mapping in `docker/redis/docker-compose.yaml`. |
+| `CC_REDIS_USER` | `default` | Redis ACL username. The `default` user is the built-in account used when no custom ACL is configured. |
+| `CC_REDIS_PASSWORD` | `mysecurepassword` | Redis ACL password. Must match the `--requirepass` value in `docker/redis/docker-compose.yaml`. |
+
+### Symbol List
+
+Defined in `packages/main/src/config/params.ts`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CC_SYMBOL_LIST` | `BTCUSDT,POLUSDT,ZECUSDT,HYPEUSDT,XAUTUSDT,DOGEUSDT,SOLUSDT,PENGUUSDT,HBARUSDT` | Comma-separated list of trading pairs for the Mode A parallel runner. Each symbol gets its own `Backtest.background(...)` context inside the same Node process. |
+
+### Telegram
+
+Defined in both `packages/main/src/config/params.ts` and `packages/core/src/config/params.ts`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CC_TELEGRAM_API_ID` | `31861455` | Telegram application ID. Obtain your own at [my.telegram.org](https://my.telegram.org). Required for `--session` mode (MTProto auth via QR scan). |
+| `CC_TELEGRAM_API_HASH` | `ca60446c67ce250ee4e789c730163449` | Telegram application hash. Paired with `CC_TELEGRAM_API_ID` — both must come from the same registered application. |
+
+## How Variables Are Read in Source
+
+The `params.ts` files use a consistent pattern: parse environment variables at module load time and fall back to a hard-coded default when the variable is absent. For numeric values a custom `parseInt` declaration handles the `unknown` input type:
+
+```typescript packages/core/src/config/params.ts
+declare function parseInt(value: unknown): number;
+
+export const CC_TELEGRAM_API_ID = parseInt(process.env.CC_TELEGRAM_API_ID) || 31861455;
+export const CC_TELEGRAM_API_HASH = process.env.CC_TELEGRAM_API_HASH || "ca60446c67ce250ee4e789c730163449";
+
+export const CC_REDIS_HOST = process.env.CC_REDIS_HOST || "127.0.0.1";
+export const CC_REDIS_PORT = parseInt(process.env.CC_REDIS_PORT) || 6379;
+export const CC_REDIS_USER = process.env.CC_REDIS_USER || "default";
+export const CC_REDIS_PASSWORD = process.env.CC_REDIS_PASSWORD || "mysecurepassword";
+
+export const CC_MONGO_CONNECTION_STRING = process.env.CC_MONGO_CONNECTION_STRING || "mongodb://localhost:27017/backtest-pro?wtimeoutMS=15000";
+```
+
+### Parsing `CC_SYMBOL_LIST`
+
+The symbol list variable uses a dedicated helper in `packages/main/src/config/params.ts` that splits on commas and trims whitespace from each entry:
+
+```typescript packages/main/src/config/params.ts
+function parseSymbolList(envVar: string, fallback: string) {
+  const originList = process.env[envVar] || fallback;
+  return originList
+    .split(",")
+    .map((s) => s.trim());
+}
+
+export const CC_SYMBOL_LIST = parseSymbolList(
+    "CC_SYMBOL_LIST",
+    "BTCUSDT,POLUSDT,ZECUSDT,HYPEUSDT,XAUTUSDT,DOGEUSDT,SOLUSDT,PENGUUSDT,HBARUSDT"
+);
+```
+
+The result is a `string[]` — for example, setting `CC_SYMBOL_LIST=BTCUSDT,ETHUSDT` produces `["BTCUSDT", "ETHUSDT"]`. The Mode A runner iterates this array and spawns one `Backtest.background(...)` context per entry, all sharing the same Node event loop and Mongo + Redis connection pools.
+
+## Setting Environment Variables
+
+Variables are loaded from `.env` by `dotenv-cli`, which is invoked by the `npm` scripts in `package.json` (e.g. `dotenv -e .env -- node ...`). You do not need to export them in your shell — just keep a `.env` file at the repo root.
+
+A minimal `.env` for a Linux machine running Docker natively (no Docker Desktop):
+
+```env
+CC_MONGO_CONNECTION_STRING=mongodb://127.0.0.1:27017/backtest-pro?wtimeoutMS=15000
+CC_REDIS_HOST=127.0.0.1
+CC_REDIS_PASSWORD=mysecurepassword
+```
+
+A minimal `.env` for Docker Desktop on Mac or Windows:
+
+```env
+CC_MONGO_CONNECTION_STRING=mongodb://host.docker.internal:27017/backtest-kit?wtimeoutMS=15000
+CC_REDIS_HOST=host.docker.internal
+CC_REDIS_PASSWORD=mysecurepassword
+```
+
+<Note>
+  The `CC_TELEGRAM_API_ID` and `CC_TELEGRAM_API_HASH` defaults are for development only and correspond to a shared demo application. Before using the `--session` run mode in any shared or production environment, register your own application at [https://my.telegram.org](https://my.telegram.org) and set your own `CC_TELEGRAM_API_ID` and `CC_TELEGRAM_API_HASH` values in `.env`.
+</Note>
+
+<Warning>
+  Never commit your `.env` file to version control — it is listed in `.gitignore` for this reason. Only `.env.example` (which contains no real secrets) should be tracked by git. If you accidentally commit credentials, rotate them immediately at [my.telegram.org](https://my.telegram.org) and update your Redis and Mongo passwords.
+</Warning>
+
+<Tip>
+  On Docker Desktop for Mac or Windows, the Node process runs on the host machine while Redis and MongoDB run inside the Docker VM. Set `CC_REDIS_HOST=host.docker.internal` (and use `host.docker.internal` in `CC_MONGO_CONNECTION_STRING`) so that the host-side Node process can reach the containers. On Linux, where Docker uses the host network directly, the default `127.0.0.1` works without any change.
+</Tip>

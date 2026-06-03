@@ -1,0 +1,212 @@
+---
+title: "BaseMap: Redis Key-Value Store Factory for @pro/core"
+sidebarTitle: "BaseMap"
+description: "API reference for BaseMap — a di-factory wrapping ioredis with namespaced keys, optional TTL, and full async-iterable iteration over a Redis keyspace."
+---
+
+`BaseMap` is exported from `packages/core/src/lib/common/BaseMap.ts` and wraps a shared `ioredis` client with a namespace prefix and an optional TTL. It uses `di-factory`'s `factory()` helper to produce a mixin class, giving you a full key-value store scoped to a specific `connectionKey` prefix — all Redis keys are stored as `<connectionKey>:<key>`. Every method is async and internally uses SCAN-based iteration to remain safe on large keyspaces.
+
+## Constructor
+
+```typescript
+BaseMap(connectionKey: string, ttlExpireSeconds?: number)
+```
+
+Extend `BaseMap` by calling it as a function:
+
+```typescript
+import BaseMap from "@pro/core/lib/common/BaseMap";
+
+class PriceAlertMap extends BaseMap("price-alerts", 60) {
+  // domain-specific helpers go here
+}
+```
+
+<ParamField path="connectionKey" type="string" required>
+  Namespace prefix for all keys stored by this map. Every key is saved to Redis as `<connectionKey>:<key>`, so different `BaseMap` subclasses never collide even when sharing the same Redis instance.
+</ParamField>
+
+<ParamField path="ttlExpireSeconds" type="number">
+  How long (in seconds) each key lives before Redis expires it automatically. Defaults to `300` (5 minutes). Pass `-1` to disable expiry entirely — keys will persist until explicitly deleted.
+</ParamField>
+
+---
+
+## Methods
+
+### set()
+
+```typescript
+async set(key: string, value: unknown): Promise<void>
+```
+
+Stores `value` in Redis at `<connectionKey>:<key>`. If `ttlExpireSeconds` is not `-1`, the key's TTL is refreshed on every write.
+
+<ParamField path="key" type="string" required>
+  The local key (without the namespace prefix). Throws `Error: Key cannot be empty` if blank.
+</ParamField>
+
+<ParamField path="value" type="unknown" required>
+  The value to store. Serialised by `ioredis` (strings are stored as-is; other types are coerced via `toString()`).
+</ParamField>
+
+---
+
+### get()
+
+```typescript
+async get(key: string | null): Promise<unknown | null>
+```
+
+Returns the stored value for the given key, or `null` if the key is `null` or does not exist in Redis.
+
+<ParamField path="key" type="string | null" required>
+  The local key to look up. Passing `null` is a safe no-op that returns `null` immediately.
+</ParamField>
+
+---
+
+### delete()
+
+```typescript
+async delete(key: string): Promise<void>
+```
+
+Removes the key `<connectionKey>:<key>` from Redis. No-ops silently if the key does not exist.
+
+<ParamField path="key" type="string" required>
+  The local key to remove.
+</ParamField>
+
+---
+
+### has()
+
+```typescript
+async has(key: string): Promise<boolean>
+```
+
+Returns `true` if `<connectionKey>:<key>` exists in Redis, `false` otherwise. Uses the Redis `EXISTS` command.
+
+<ParamField path="key" type="string" required>
+  The local key to check.
+</ParamField>
+
+---
+
+### clear()
+
+```typescript
+async clear(): Promise<void>
+```
+
+Removes **all** keys matching `<connectionKey>:*` using repeated SCAN + DEL batches of `ITERATOR_BATCH_SIZE` (100 keys per batch). This approach is non-blocking and safe on large keyspaces — it never runs a full `KEYS` scan that would stall the Redis event loop.
+
+---
+
+### toArray()
+
+```typescript
+async toArray(): Promise<[string, unknown][]>
+```
+
+Collects every key-value pair in the namespace into an in-memory array. Keys are returned **without** the `connectionKey` prefix.
+
+**Returns** an array of `[localKey, value]` tuples.
+
+```typescript
+const alerts = await priceAlertMap.toArray();
+// [["BTCUSDT", "65000"], ["ETHUSDT", "3200"], ...]
+```
+
+<Warning>
+  `toArray()` loads the entire namespace into memory. For very large keyspaces prefer `iterate()`.
+</Warning>
+
+---
+
+### iterate()
+
+```typescript
+async *iterate(): AsyncIterableIterator<readonly [string, unknown]>
+```
+
+An async iterator over `[localKey, value]` pairs in the namespace, using SCAN batches of 100. Memory-efficient for large keyspaces.
+
+```typescript
+for await (const [key, value] of priceAlertMap.iterate()) {
+  console.log(key, value);
+}
+```
+
+---
+
+### keys()
+
+```typescript
+async *keys(): AsyncIterableIterator<string>
+```
+
+An async iterator over local keys only (namespace prefix stripped). Uses the same SCAN-batch approach as `iterate()`.
+
+```typescript
+for await (const key of priceAlertMap.keys()) {
+  console.log(key); // e.g. "BTCUSDT"
+}
+```
+
+---
+
+### values()
+
+```typescript
+async *values(): AsyncIterableIterator<unknown>
+```
+
+An async iterator over stored values only, in the same SCAN-batch order as `keys()`.
+
+```typescript
+for await (const value of priceAlertMap.values()) {
+  console.log(value);
+}
+```
+
+---
+
+### size()
+
+```typescript
+async size(): Promise<number>
+```
+
+Returns the total number of keys in the namespace by accumulating SCAN cursor counts. Does **not** use `DBSIZE` — the count is scoped to `<connectionKey>:*` only.
+
+**Returns** `number` — the count of keys currently stored under this namespace.
+
+---
+
+## TBaseMap
+
+When you need to accept any `BaseMap` subclass as a function parameter, use the utility type:
+
+```typescript
+import { TBaseMap } from "@pro/core/lib/common/BaseMap";
+
+function logSize(map: TBaseMap): Promise<void> {
+  return map.size().then((n) => console.log(`Map has ${n} keys`));
+}
+```
+
+`TBaseMap` is defined as:
+
+```typescript
+export type TBaseMap = InstanceType<ReturnType<typeof BaseMap>>;
+```
+
+It resolves to the instance type of any class produced by the `BaseMap` factory, giving you full method-level typing without coupling to a specific subclass.
+
+---
+
+<Note>
+  The underlying Redis client is obtained from `getRedis()` imported from `@backtest-kit/mongo`. This is the same shared `ioredis` client used throughout the monorepo, so all `BaseMap` subclasses operate on the same Redis connection pool.
+</Note>

@@ -1,0 +1,113 @@
+---
+title: "Single-Symbol Backtest with @backtest-kit/cli Runner"
+sidebarTitle: "Single Strategy"
+description: "Run Mode B: backtest a single symbol without the --entry flag, letting @backtest-kit/cli load and execute your strategy file directly."
+---
+
+Mode B is the single-symbol execution path, activated by passing `--backtest` without `--entry`. When `--entry` is absent, `packages/main/src/main/backtest.ts` hits its first guard (`if (!values.entry) return`) and exits immediately, handing full control to the `@backtest-kit/cli` bundled runner. The CLI loads the strategy file you supply as the positional argument, calls the schemas registered inside it, and runs a backtest for whatever symbol the strategy itself declares. There is no iteration over `CC_SYMBOL_LIST` — one file, one symbol, one run.
+
+## The Mode B Command
+
+```bash
+npm run start -- --backtest --ui --noCache \
+  ./content/apr_2026.strategy/apr_2026.strategy.ts
+```
+
+Notice the absence of `--entry`. This is the only difference from the Mode A command that changes the entire execution path.
+
+### Flag Reference
+
+| Flag | Type | Purpose |
+|---|---|---|
+| `--backtest` | boolean | Tells `@backtest-kit/cli` to run in backtest mode |
+| `--ui` | boolean | Starts the `@backtest-kit/ui` web interface on `:60050` |
+| `--noCache` | boolean | Candles are fetched live from ccxt on each tick rather than read from MongoDB |
+
+<Note>
+  `--noCache` means candles are fetched live from ccxt on each tick — useful for testing fetch logic or working with the very latest data, but noticeably slower for benchmarking than the pre-warmed `--cache` path.
+</Note>
+
+## How Mode B Differs from Mode A
+
+The gate pattern in `backtest.ts` makes the split explicit:
+
+```typescript
+// packages/main/src/main/backtest.ts
+const main = async () => {
+  const { values } = getArgs();
+
+  if (!values.entry) {
+    return;          // ← Mode B exits here; @backtest-kit/cli takes over
+  }
+
+  if (!values.backtest) {
+    return;
+  }
+
+  // Mode A continues from here ...
+  await waitForReady(true);
+  // ...
+  for (const symbol of CC_SYMBOL_LIST) {
+    Backtest.background(symbol, { ... });
+  }
+};
+```
+
+In Mode B, `main()` returns before reaching `waitForReady`, before iterating `CC_SYMBOL_LIST`, and before calling `Backtest.background()`. The `@backtest-kit/cli` runner is already running alongside this file — it simply takes the strategy path from the positional argument, evaluates it, and executes whatever schemas are registered inside.
+
+## The Strategy File Controls the Symbol
+
+In Mode B the symbol is not determined by `CC_SYMBOL_LIST` or any environment variable. It is determined by the `addStrategySchema()` call inside the strategy file itself. The strategy author registers the symbol (and exchange, and time frame) directly:
+
+```typescript
+// Conceptual illustration — actual call lives inside the strategy module
+addStrategySchema({
+  strategyName: "apr_2026",
+  // exchange, frame, and symbol are wired in the strategy's module files
+});
+```
+
+The sibling `modules/backtest.module.ts` file in the strategy directory is where the exchange schema (including the symbol) and frame schema are registered. `@backtest-kit/cli` evaluates those module registrations when it loads the strategy file, giving it everything it needs to run exactly one backtest context.
+
+## When to Use Mode B vs Mode A
+
+<CardGroup cols={2}>
+  <Card title="Use Mode B when..." icon="magnifying-glass">
+    - You are developing or debugging a new strategy
+    - You want fast iteration on a single symbol without waiting for 8 other symbols to complete
+    - You are tuning indicator parameters and need a tight edit → run → inspect cycle
+    - You want to verify that a strategy file loads and runs without errors before committing to a full portfolio run
+  </Card>
+  <Card title="Use Mode A when..." icon="chart-bar">
+    - You want a realistic portfolio-level view across all 9 symbols simultaneously
+    - You are benchmarking overall system throughput
+    - You are validating that a strategy behaves consistently across correlated and uncorrelated assets
+    - You are preparing results for comparison against live or paper performance
+  </Card>
+</CardGroup>
+
+<Tip>
+  Use Mode B during strategy development, then switch to Mode A (with `--entry` and `--cache`) for a full portfolio run once the strategy is stable. The two modes share the same strategy file — no changes to the strategy code are required when switching between them.
+</Tip>
+
+## Typical Workflow
+
+<Steps>
+  <Step title="Write the strategy file">
+    Create a new directory under `./content/<name>.strategy/` and add a `.strategy.ts` file that calls `addStrategySchema()`. Add a sibling `modules/backtest.module.ts` that registers the exchange schema (with the symbol you want to test) and the frame schema.
+  </Step>
+  <Step title="Run Mode B for rapid iteration">
+    ```bash
+    npm run start -- --backtest --ui --noCache \
+      ./content/<name>.strategy/<name>.strategy.ts
+    ```
+    Inspect results in the `@backtest-kit/ui` dashboard at `http://localhost:60050`. Adjust strategy parameters and re-run.
+  </Step>
+  <Step title="Switch to Mode A for full portfolio validation">
+    ```bash
+    npm run start -- --backtest --entry --ui --cache \
+      ./content/<name>.strategy/<name>.strategy.ts
+    ```
+    The `--entry` flag activates `backtest.ts`'s Mode A path, which iterates `CC_SYMBOL_LIST` and runs all 9 symbols concurrently.
+  </Step>
+</Steps>

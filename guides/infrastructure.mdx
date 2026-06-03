@@ -1,0 +1,179 @@
+---
+title: "Setting Up MongoDB and Redis Infrastructure"
+sidebarTitle: "Infrastructure"
+description: "Launch the MongoDB 8 and Redis 7 Docker services bundled with the monorepo, configure ports and volumes, and verify connectivity before running backtests."
+---
+
+The monorepo ships two self-contained `docker-compose` files — one for **MongoDB 8** (`docker/mongodb/docker-compose.yaml`) and one for **Redis 7** (`docker/redis/docker-compose.yaml`). Both services are prerequisites for every run mode: MongoDB stores candle data, position state, and session records, while Redis acts as an O(1) lookup cache that sits in front of every Mongo read on the hot path.
+
+## MongoDB
+
+The MongoDB compose file pins the image to the official Community Server build `8.0.4-ubi8`, exposes the default port, and mounts a local `mongo_data` volume so candle data survives container restarts.
+
+```yaml docker/mongodb/docker-compose.yaml
+version: '3.8'
+services:
+  mongodb:
+    image: mongodb/mongodb-community-server:8.0.4-ubi8
+    container_name: mongodb
+    ports:
+      - '27017:27017'
+    volumes:
+      - ./mongo_data:/data/db
+    restart: always
+volumes:
+  mongo_data:
+```
+
+Key points:
+
+- **Image**: `mongodb/mongodb-community-server:8.0.4-ubi8` — MongoDB 8.0.4 on UBI 8.
+- **Port**: `27017:27017` — the standard Mongo port, mapped 1-to-1 from host to container.
+- **Volume**: `./mongo_data:/data/db` — candle cache and all collection data persist here.
+- **`restart: always`**: the container comes back up automatically after a host reboot.
+
+## Redis
+
+The Redis compose file pins to `redis:7.4.1`, sets a password via both an environment variable and the `--requirepass` server flag, and mounts a `redis_data` volume.
+
+```yaml docker/redis/docker-compose.yaml
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7.4.1
+    container_name: redis
+    ports:
+      - "6379:6379"
+    environment:
+      - REDIS_PASSWORD=mysecurepassword
+    command: ["redis-server", "--requirepass", "mysecurepassword"]
+    volumes:
+      - ./redis_data:/data
+    restart: always
+
+volumes:
+  redis_data:
+```
+
+Key points:
+
+- **Image**: `redis:7.4.1` — Redis 7.4.1 stable.
+- **Port**: `6379:6379` — the standard Redis port.
+- **Password**: `mysecurepassword` — set in both `environment` and the server `command`. Must match `CC_REDIS_PASSWORD` in your `.env`.
+- **Volume**: `./redis_data:/data` — AOF / RDB snapshots persist here between restarts.
+
+## Starting Both Services
+
+Run these two commands from the repo root to bring both containers up in detached mode:
+
+```bash
+docker-compose -f docker/mongodb/docker-compose.yaml up -d
+docker-compose -f docker/redis/docker-compose.yaml up -d
+```
+
+## Verifying Connectivity
+
+**MongoDB** — inspect the container logs and look for the `Waiting for connections` message, which confirms the server is ready to accept clients:
+
+```bash
+docker logs mongodb
+```
+
+Expected output (abbreviated):
+
+```
+{"t":{"$date":"..."},"s":"I","c":"NETWORK","id":23016,"ctx":"listener","msg":"Waiting for connections","attr":{"port":27017,"ssl":"off"}}
+```
+
+**Redis** — run a `PING` through the CLI inside the container. The `-a` flag supplies the password:
+
+```bash
+docker exec -it redis redis-cli -a mysecurepassword ping
+```
+
+Expected output:
+
+```
+PONG
+```
+
+<Note>
+  The `.env.example` file sets `CC_REDIS_HOST=host.docker.internal`. This is the correct value for **Docker Desktop on Mac and Windows**, where containers and the host are on separate network namespaces. On **Linux** (where Docker runs natively on the host network), use `CC_REDIS_HOST=127.0.0.1` — this is already the default in `packages/core/src/config/params.ts`.
+</Note>
+
+## Port Reference
+
+| Service | Default Port | Config Key |
+|---|---|---|
+| MongoDB | `27017` | `CC_MONGO_CONNECTION_STRING` |
+| Redis | `6379` | `CC_REDIS_PORT` |
+| backtest-kit UI | `60050` | — (fixed, served by `@backtest-kit/ui`) |
+
+## Data Persistence
+
+Both compose files declare named volumes (`mongo_data`, `redis_data`). These volumes are **not** deleted when you run `docker-compose down` — your candle cache, session data, and Redis snapshots survive a normal stop/start cycle.
+
+To wipe all stored data and start from scratch, pass the `-v` flag:
+
+```bash
+docker-compose -f docker/mongodb/docker-compose.yaml down -v
+docker-compose -f docker/redis/docker-compose.yaml down -v
+```
+
+<Warning>
+  The default Redis password is `mysecurepassword`. For any deployment beyond your local machine, change this value in **both** `docker/redis/docker-compose.yaml` (the `REDIS_PASSWORD` env var and the `--requirepass` argument) and in your `.env` file (`CC_REDIS_PASSWORD`). Leaving the default in production exposes your cache to unauthenticated access.
+</Warning>
+
+## Building the Workspace Packages
+
+Once infrastructure is running, build the monorepo packages before starting any run mode.
+
+<Steps>
+  <Step title="Install root dependencies">
+    Run `npm install` at the repository root. This installs the workspace tooling and links all `packages/*` together via npm workspaces.
+
+    ```bash
+    npm install
+    ```
+  </Step>
+
+  <Step title="Build all packages">
+    Choose the command that matches your platform:
+
+    ```bash
+    npm run build          # Linux / macOS → delegates to scripts/linux/build.sh
+    npm run build:win      # Windows       → delegates to scripts/win/build.bat
+    ```
+
+    Both scripts do the same thing: walk every directory under `packages/`, enter each one, and run `npm run build` inside it (which invokes `rollup -c`):
+
+    ```bash
+    # scripts/linux/build.sh (simplified)
+    cd packages
+    for D in $(find . -maxdepth 1 -not -path "." -not -path "./.*" -type d); do
+        cd $D
+        npm install
+        npm run build   # → rollup -c
+        cd ..
+    done
+    cd ..
+    ```
+  </Step>
+
+  <Step title="Verify build artifacts">
+    Each package emits two artifacts after a successful build:
+
+    | Artifact | Purpose |
+    |---|---|
+    | `packages/<pkg>/build/index.cjs` | CommonJS bundle consumed at runtime via `config/alias.config.ts` |
+    | `packages/<pkg>/types.d.ts` | Rolled-up declaration bundle consumed at compile-time via `tsconfig.json` `paths` |
+
+    For example, after building `@pro/core` you will find:
+
+    ```
+    packages/core/build/index.cjs
+    packages/core/types.d.ts
+    ```
+  </Step>
+</Steps>

@@ -1,0 +1,123 @@
+---
+title: "Configuring Per-Subsystem Persistence Adapters"
+sidebarTitle: "Persistence"
+description: "Configure which storage adapter each backtest-kit subsystem uses in config/setup.config.ts — swap between MongoDB, local file, and in-memory adapters per mode."
+---
+
+`config/setup.config.ts` is the single file that wires all persistence adapters for the entire monorepo. Every backtest-kit subsystem has two adapter slots — one for **Live** mode and one for **Backtest** mode — and this file makes exactly one call per slot. Changing a subsystem's storage backend for either mode is a one-line edit here; no other file needs to change.
+
+## The Full Configuration File
+
+```typescript config/setup.config.ts
+import { setup } from "@backtest-kit/mongo";
+
+import {
+  Markdown,
+  StorageLive,
+  StorageBacktest,
+  NotificationLive,
+  NotificationBacktest,
+  RecentLive,
+  RecentBacktest,
+  Dump,
+  MemoryLive,
+  MemoryBacktest,
+  StateLive,
+  StateBacktest,
+  SessionLive,
+  SessionBacktest,
+  Log,
+} from "backtest-kit";
+
+{
+  Dump.useMarkdown();
+}
+
+{
+  SessionLive.usePersist();
+  SessionBacktest.useLocal();
+}
+
+{
+  StorageLive.usePersist();
+  StorageBacktest.useMemory();
+}
+
+{
+  RecentLive.usePersist();
+  RecentBacktest.useMemory();
+}
+
+{
+  NotificationLive.usePersist();
+  NotificationBacktest.useMemory();
+}
+
+{
+  RecentLive.usePersist();
+  RecentBacktest.useMemory();
+}
+
+{
+  MemoryLive.usePersist();
+  MemoryBacktest.useLocal();
+}
+
+{
+  StateLive.usePersist();
+  StateBacktest.useLocal();
+}
+
+{
+  Markdown.useDummy();
+  Log.useJsonl();
+}
+
+setup();
+```
+
+## Adapter Choices by Subsystem
+
+The table below explains each subsystem's live and backtest adapter and the reasoning behind the choice.
+
+| Subsystem | Live Adapter | Backtest Adapter | Rationale |
+|---|---|---|---|
+| **Session** | Persist (Mongo) | Local file | Live sessions are long-lived and must survive process restarts — Mongo provides durable, queryable storage. Backtest runs use local files so each replay produces a deterministic, inspectable session snapshot. |
+| **Storage** | Persist (Mongo) | Memory | Generic key/value storage is accessed on every tick in live mode and must be durable. In the backtest hot loop there is no need to persist transient data; memory keeps I/O off the critical path. |
+| **Recent** | Persist (Mongo) | Memory | Recent-event queues are needed for live signal logic but are purely ephemeral during replay. Memory eliminates all disk and network overhead for this subsystem in backtest mode. |
+| **Notification** | Persist (Mongo) | Memory | Notifications are meaningful only in live mode (Telegram alerts, etc.). Backtest mode skips persistence entirely so the hot loop is never blocked by outbound I/O. |
+| **Memory** | Persist (Mongo) | Local file | The Memory subsystem holds cross-tick agent state. In live mode, Mongo ensures state is not lost on restarts. In backtest mode, a local file lets you inspect agent memory between debug runs without hitting Mongo. |
+| **State** | Persist (Mongo) | Local file | State mirrors Memory in purpose. Local file adapters for backtest mean you can `cat` a state file after a run to understand exactly what the strategy saw at each decision point. |
+| **Markdown** | Dummy (no-op) | Dummy (no-op) | Human-readable markdown dump reports are not needed in either mode by default. The `Dump.useMarkdown()` call arms the formatter, but `Markdown.useDummy()` means no files are ever written. |
+| **Log** | JSONL | JSONL | Structured JSONL logs are always on in both modes. They are the primary observability surface — grep-able, pipe-able, and ingested by most log aggregators without a parser. |
+
+## How `setup()` Connects to Infrastructure
+
+The final line of the file calls `setup()` from `@backtest-kit/mongo`. This function:
+
+1. Reads `CC_MONGO_CONNECTION_STRING` from the environment and opens a Mongoose connection to MongoDB.
+2. Reads `CC_REDIS_HOST`, `CC_REDIS_PORT`, `CC_REDIS_USER`, and `CC_REDIS_PASSWORD` from the environment and initialises an `ioredis` client.
+
+Both connections are established once at startup and shared across all subsystems that use `usePersist()`. No connection is opened for subsystems that use `useMemory()` or `useLocal()`.
+
+## Swapping an Adapter
+
+Each adapter call is a single line. To change the backtest Storage adapter from in-memory to a local file — for example, when you want to inspect storage state between debug runs — find the `StorageBacktest` block and replace `useMemory()` with `useLocal()`:
+
+```typescript
+// Before — memory (default, fastest)
+StorageBacktest.useMemory();
+
+// After — local file (useful for debugging between runs)
+StorageBacktest.useLocal();
+```
+
+Revert to `useMemory()` when debugging is complete to restore hot-loop performance.
+
+<Tip>
+  Use **Memory adapters** for all backtest subsystems to eliminate disk and network I/O from the hot path. The measured ~6 300× real-time aggregate replay speed depends on keeping the inner loop CPU-bound. Switch individual subsystems to **Local file adapters** only when you need to inspect persisted state between runs for debugging — then revert before benchmarking.
+</Tip>
+
+## The `Dump.useMarkdown()` Call
+
+`Dump.useMarkdown()` arms the dump formatter so that any code calling `Dump.write(...)` at runtime will produce human-readable Markdown output rather than JSON. In the current configuration this call is present but the downstream `Markdown.useDummy()` makes the write a no-op — the formatter is ready but no files are created. To enable actual Markdown report generation, replace `Markdown.useDummy()` with `Markdown.useLocal()` (writes to the local filesystem) or `Markdown.usePersist()` (writes to Mongo).

@@ -1,0 +1,272 @@
+---
+title: "Adding a New Service to @pro/core"
+sidebarTitle: "New Services"
+description: "Extend the @pro/core package with a new injectable service in five steps: create the class, register a symbol, provide a factory, expose on ioc, and rebuild."
+---
+
+The DI system in `@pro/core` uses symbol-keyed tokens managed by `di-kit`'s `createActivator("pro")`. Adding a service is a deterministic five-step recipe that touches exactly four files in `packages/core/` — no content files under `./content/` ever need to change, because `globalThis.core` is a typed reference to the `ioc` object and gains the new service automatically once `ioc` is updated and the package is rebuilt.
+
+<Steps>
+
+  <Step title="File — create the service class">
+    Drop your new service file under the appropriate category directory:
+
+    ```
+    packages/core/src/lib/services/<category>/XService.ts
+    ```
+
+    For reference, the existing `CryptoYodaScreenService` lives under `services/screen/` and injects its own dependencies lazily via `inject()`:
+
+    ```typescript
+    // packages/core/src/lib/services/screen/CryptoYodaScreenService.ts
+    import { inject } from "../../core/di";
+    import LoggerService from "../base/LoggerService";
+    import TYPES from "../../core/types";
+    import ParserService from "../core/ParserService";
+    import ScraperService from "../core/ScraperService";
+
+    export class CryptoYodaScreenService {
+      private readonly loggerService = inject<LoggerService>(TYPES.loggerService);
+      private readonly parserService = inject<ParserService>(TYPES.parserService);
+      private readonly scraperService = inject<ScraperService>(TYPES.scraperService);
+
+      public screenDay = async (date: Date) => {
+        this.loggerService.log("cryptoYodaScreenService screenDay", { date });
+        const scraperList = await this.scraperService.scrapeDay("crypto_yoda_channel", date);
+        return await this.parserService.parseDay(scraperList, {});
+      };
+    }
+
+    export default CryptoYodaScreenService;
+    ```
+
+    A hypothetical `PriceAlertService` would follow the same structure:
+
+    ```typescript
+    // packages/core/src/lib/services/alerts/PriceAlertService.ts
+    import { inject } from "../../core/di";
+    import LoggerService from "../base/LoggerService";
+    import TYPES from "../../core/types";
+
+    export class PriceAlertService {
+      private readonly loggerService = inject<LoggerService>(TYPES.loggerService);
+
+      public checkAlert = async (symbol: string, price: number): Promise<boolean> => {
+        this.loggerService.log("priceAlertService checkAlert", { symbol, price });
+        // ... alert logic
+        return false;
+      };
+    }
+
+    export default PriceAlertService;
+    ```
+  </Step>
+
+  <Step title="Symbol — register a DI token in types.ts">
+    Open `packages/core/src/lib/core/types.ts` and add your symbol to the appropriate group. The file currently defines four groups that are spread into `TYPES`:
+
+    <CodeGroup>
+
+    ```typescript Before
+    // packages/core/src/lib/core/types.ts
+    const baseServices = {
+        loggerService: Symbol('loggerService'),
+    };
+
+    const dbServices = {
+        candleDbService: Symbol('candleDbService'),
+    }
+
+    const coreServices = {
+        scraperService: Symbol('scraperService'),
+        parserService: Symbol('parserService'),
+    }
+
+    const screenServices = {
+        cryptoYodaScreenService: Symbol('cryptoYodaScreenService'),
+    }
+
+    export const TYPES = {
+        ...baseServices,
+        ...dbServices,
+        ...coreServices,
+        ...screenServices,
+    }
+
+    export default TYPES;
+    ```
+
+    ```typescript After
+    // packages/core/src/lib/core/types.ts
+    const baseServices = {
+        loggerService: Symbol('loggerService'),
+    };
+
+    const dbServices = {
+        candleDbService: Symbol('candleDbService'),
+    }
+
+    const coreServices = {
+        scraperService: Symbol('scraperService'),
+        parserService: Symbol('parserService'),
+    }
+
+    const screenServices = {
+        cryptoYodaScreenService: Symbol('cryptoYodaScreenService'),
+    }
+
+    const alertServices = {
+        priceAlertService: Symbol('priceAlertService'),
+    }
+
+    export const TYPES = {
+        ...baseServices,
+        ...dbServices,
+        ...coreServices,
+        ...screenServices,
+        ...alertServices,
+    }
+
+    export default TYPES;
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Provider — register a factory in provide.ts">
+    Open `packages/core/src/lib/core/provide.ts` and add a `provide()` call. Each call associates the symbol from `TYPES` with a factory function that constructs the service instance. The existing file uses braced blocks to keep groups visually separated:
+
+    <CodeGroup>
+
+    ```typescript Before
+    // packages/core/src/lib/core/provide.ts
+    import LoggerService from "../services/base/LoggerService";
+    import CandleDbService from "../services/db/CandleDbService";
+    import ParserService from "../services/core/ParserService";
+    import ScraperService from "../services/core/ScraperService";
+    import CryptoYodaScreenService from "../services/screen/CryptoYodaScreenService";
+    import { provide } from "./di";
+    import TYPES from "./types";
+
+    {
+        provide(TYPES.loggerService, () => new LoggerService());
+    }
+    {
+        provide(TYPES.candleDbService, () => new CandleDbService());
+    }
+    {
+        provide(TYPES.scraperService, () => new ScraperService());
+        provide(TYPES.parserService, () => new ParserService());
+    }
+    {
+        provide(TYPES.cryptoYodaScreenService, () => new CryptoYodaScreenService());
+    }
+    ```
+
+    ```typescript After
+    // packages/core/src/lib/core/provide.ts
+    import LoggerService from "../services/base/LoggerService";
+    import CandleDbService from "../services/db/CandleDbService";
+    import ParserService from "../services/core/ParserService";
+    import ScraperService from "../services/core/ScraperService";
+    import CryptoYodaScreenService from "../services/screen/CryptoYodaScreenService";
+    import PriceAlertService from "../services/alerts/PriceAlertService";
+    import { provide } from "./di";
+    import TYPES from "./types";
+
+    {
+        provide(TYPES.loggerService, () => new LoggerService());
+    }
+    {
+        provide(TYPES.candleDbService, () => new CandleDbService());
+    }
+    {
+        provide(TYPES.scraperService, () => new ScraperService());
+        provide(TYPES.parserService, () => new ParserService());
+    }
+    {
+        provide(TYPES.cryptoYodaScreenService, () => new CryptoYodaScreenService());
+    }
+    {
+        provide(TYPES.priceAlertService, () => new PriceAlertService());
+    }
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Expose — add to the ioc object in lib/index.ts">
+    Open `packages/core/src/lib/index.ts` and add an `inject<T>()` entry to the appropriate group object. The `ioc` export is what gets assigned to `globalThis.core` — every field added here becomes immediately accessible as `core.<field>` in strategy files:
+
+    <CodeGroup>
+
+    ```typescript Before
+    // packages/core/src/lib/index.ts (relevant sections)
+    import CryptoYodaScreenService from "./services/screen/CryptoYodaScreenService";
+    import CandleDbService from "./services/db/CandleDbService";
+
+    const screenServices = {
+      cryptoYodaScreenService: inject<CryptoYodaScreenService>(TYPES.cryptoYodaScreenService),
+    }
+
+    export const ioc = {
+      ...baseServices,
+      ...coreServices,
+      ...dbServices,
+      ...screenServices,
+    };
+    ```
+
+    ```typescript After
+    // packages/core/src/lib/index.ts (relevant sections)
+    import CryptoYodaScreenService from "./services/screen/CryptoYodaScreenService";
+    import CandleDbService from "./services/db/CandleDbService";
+    import PriceAlertService from "./services/alerts/PriceAlertService";
+
+    const screenServices = {
+      cryptoYodaScreenService: inject<CryptoYodaScreenService>(TYPES.cryptoYodaScreenService),
+    }
+
+    const alertServices = {
+      priceAlertService: inject<PriceAlertService>(TYPES.priceAlertService),
+    }
+
+    export const ioc = {
+      ...baseServices,
+      ...coreServices,
+      ...dbServices,
+      ...screenServices,
+      ...alertServices,
+    };
+    ```
+
+    </CodeGroup>
+
+    The `declare global { var core: typeof ioc; }` block at the bottom of `index.ts` ensures TypeScript infers the new field across the entire workspace without any additional type declarations.
+  </Step>
+
+  <Step title="Build — regenerate types.d.ts">
+    Run the workspace build to emit a fresh `types.d.ts` for `@pro/core`:
+
+    ```bash
+    npm run build        # Linux / macOS
+    npm run build:win    # Windows
+    ```
+
+    After the build, `core.priceAlertService` is globally typed and callable from any strategy file under `./content/` — no imports needed:
+
+    ```typescript
+    // content/my.strategy/my.strategy.ts
+    const isAlert = await core.priceAlertService.checkAlert("BTCUSDT", 70000);
+    ```
+  </Step>
+
+</Steps>
+
+## Why content/ files never need to change
+
+`globalThis.core` is assigned in `packages/core/src/lib/index.ts` with `Object.assign(globalThis, { core: ioc })`. The `declare global { var core: typeof ioc; }` block in the same file makes TypeScript treat `core` as a globally typed variable throughout the workspace, resolved via the `paths` entry in `tsconfig.json` that points at the rolled-up `types.d.ts`. Once `ioc` gains a new service entry, that service is automatically available on `core` in every strategy file — no re-bundling or import changes required in `./content/`.
+
+<Note>
+  The DI system uses lazy injection — `inject()` resolves the service instance when the property is first accessed, not at module load time. This means circular dependencies between services are safe as long as services do not access each other during their own construction (i.e., not in a constructor body). Accessing `this.otherService` inside a method is always safe.
+</Note>

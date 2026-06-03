@@ -1,0 +1,184 @@
+---
+title: "Runtime Configuration Files: alias, loader, and setup"
+sidebarTitle: "Config Files"
+description: "Reference for config/ — alias.config.ts maps packages to CJS bundles, loader.config.ts bootstraps DI, and setup.config.ts wires all persistence adapters."
+---
+
+The `config/` directory at the monorepo root contains three files that wire the runtime together. They are discovered and loaded by `@backtest-kit/cli` before any strategy file runs — you do not import them yourself. Together they map local packages to their built bundles, initialize the DI container and database connections, and configure every persistence adapter used by the strategy framework.
+
+---
+
+## alias.config.ts — Package Alias Map
+
+`alias.config.ts` exports a plain object that maps internal package names to their pre-built CommonJS bundles. `@backtest-kit/cli` uses this map to resolve `@pro/core` and `@pro/main` at runtime without requiring entries in `node_modules`.
+
+```typescript
+// config/alias.config.ts
+export default {
+  "@pro/core": require("../packages/core/build/index.cjs"),
+  "@pro/main": require("../packages/main/build/index.cjs"),
+};
+```
+
+<ResponseField name="@pro/core" type="string → CJS module">
+  Resolves to `packages/core/build/index.cjs` — the compiled core package containing DI providers, schema definitions, services, and models.
+</ResponseField>
+
+<ResponseField name="@pro/main" type="string → CJS module">
+  Resolves to `packages/main/build/index.cjs` — the compiled main package containing the four entry-point mode modules.
+</ResponseField>
+
+<Warning>
+  Always run `npm run build` after changing any file under `packages/` — the config files `require()` the built `.cjs` bundles, not the TypeScript source. Stale bundles will silently run old code.
+</Warning>
+
+---
+
+## loader.config.ts — DI Bootstrap
+
+`loader.config.ts` exports an async default function that `@backtest-kit/cli` calls after loading strategy files and before executing them. Importing `@pro/core` and `@pro/main` has side-effects that register all DI providers and set `globalThis.core`. `waitForInit()` then blocks until MongoDB and Redis connections are established.
+
+```typescript
+// config/loader.config.ts
+import { waitForInit } from "@backtest-kit/mongo";
+
+import "@pro/core";
+import "@pro/main";
+
+export default async () => {
+  await waitForInit();
+};
+```
+
+<ResponseField name="import '@pro/core'" type="side-effect import">
+  Registers all core DI providers (services, schemas, repositories) and sets `globalThis.core`. Must be imported before any code that calls `inject()`.
+</ResponseField>
+
+<ResponseField name="import '@pro/main'" type="side-effect import">
+  Registers the four mode dispatchers (`backtest`, `live`, `paper`, `session`) into the DI container.
+</ResponseField>
+
+<ResponseField name="waitForInit()" type="async () => void">
+  Exported from `@backtest-kit/mongo`. Resolves once the MongoDB connection pool and Redis client are both ready. Any code that reads from or writes to the database must await this implicitly via the loader.
+</ResponseField>
+
+<Note>
+  `loader.config.ts` is referenced by `@backtest-kit/cli` internally — you do not call this function yourself. The CLI discovers it by convention from the project root.
+</Note>
+
+---
+
+## setup.config.ts — Persistence Adapter Configuration
+
+`setup.config.ts` configures every persistence subsystem exported by `backtest-kit` and then calls `setup()` from `@backtest-kit/mongo` to initialize the database connections. Each subsystem's static methods (`usePersist()`, `useMemory()`, `useLocal()`, `useDummy()`, `useJsonl()`) select the storage backend for that subsystem.
+
+```typescript
+// config/setup.config.ts
+import { setup } from "@backtest-kit/mongo";
+
+import {
+  Markdown,
+  StorageLive,
+  StorageBacktest,
+  NotificationLive,
+  NotificationBacktest,
+  RecentLive,
+  RecentBacktest,
+  Dump,
+  MemoryLive,
+  MemoryBacktest,
+  StateLive,
+  StateBacktest,
+  SessionLive,
+  SessionBacktest,
+  Log,
+} from "backtest-kit";
+
+{
+  Dump.useMarkdown();
+}
+
+{
+  SessionLive.usePersist();
+  SessionBacktest.useLocal();
+}
+
+{
+  StorageLive.usePersist();
+  StorageBacktest.useMemory();
+}
+
+{
+  RecentLive.usePersist();
+  RecentBacktest.useMemory();
+}
+
+{
+  NotificationLive.usePersist();
+  NotificationBacktest.useMemory();
+}
+
+{
+  RecentLive.usePersist();
+  RecentBacktest.useMemory();
+}
+
+{
+  MemoryLive.usePersist();
+  MemoryBacktest.useLocal();
+}
+
+{
+  StateLive.usePersist();
+  StateBacktest.useLocal();
+}
+
+{
+  Markdown.useDummy();
+  Log.useJsonl();
+}
+
+setup();
+```
+
+### Adapter Matrix
+
+| Subsystem | Live adapter | Backtest adapter |
+|---|---|---|
+| `Session` | `usePersist()` — MongoDB | `useLocal()` — local filesystem |
+| `Storage` | `usePersist()` — MongoDB | `useMemory()` — in-process map |
+| `Recent` | `usePersist()` — MongoDB | `useMemory()` — in-process map |
+| `Notification` | `usePersist()` — MongoDB | `useMemory()` — in-process map |
+| `Memory` | `usePersist()` — MongoDB | `useLocal()` — local filesystem |
+| `State` | `usePersist()` — MongoDB | `useLocal()` — local filesystem |
+| `Dump` | `useMarkdown()` | — |
+| `Markdown` | `useDummy()` | — |
+| `Log` | `useJsonl()` | — |
+
+<ResponseField name="usePersist()" type="static method">
+  Stores data in MongoDB via `@backtest-kit/mongo`. Used for live and paper trading subsystems where state must survive process restarts.
+</ResponseField>
+
+<ResponseField name="useMemory()" type="static method">
+  Stores data in an in-process JavaScript `Map`. Fast and zero-setup — appropriate for backtest runs that don't need persistence between replays.
+</ResponseField>
+
+<ResponseField name="useLocal()" type="static method">
+  Stores data on the local filesystem (JSON files). Used for backtest subsystems where persistence across runs is useful but MongoDB overhead is undesirable.
+</ResponseField>
+
+<ResponseField name="useDummy()" type="static method">
+  No-op adapter — discards all writes. Used for subsystems that are not relevant in the current mode (e.g. `Markdown` in live mode).
+</ResponseField>
+
+<ResponseField name="useJsonl()" type="static method">
+  Appends structured log entries to a `.jsonl` file on disk. Used for the `Log` subsystem.
+</ResponseField>
+
+<ResponseField name="useMarkdown()" type="static method">
+  Writes dump output as Markdown files. Used for the `Dump` subsystem.
+</ResponseField>
+
+<Note>
+  These config files are referenced by `@backtest-kit/cli` internally — you don't import them yourself. The CLI discovers them by convention from the project root.
+</Note>

@@ -1,0 +1,274 @@
+---
+title: "Candle MongoDB Schema and CandleDbService Reference"
+sidebarTitle: "Candle Schema"
+description: "Reference for the Candle Mongoose schema, ICandleDto and ICandleRow interfaces, compound unique index, and the CandleDbService CRUD and lookup methods."
+---
+
+The Candle schema defines the MongoDB document structure for OHLCV candle data. It is the core persistence layer for the backtest candle cache — every call to `cacheCandles()` in `backtest.ts` ultimately writes through this schema. The schema lives at `packages/core/src/schema/Candle.schema.ts` and is consumed exclusively by `CandleDbService`.
+
+---
+
+## Supported Intervals
+
+The `interval` field is constrained to the values in `INTERVAL_ENUM`. Any value outside this set will fail Mongoose validation.
+
+```typescript
+const INTERVAL_ENUM = [
+  "1m", "3m", "5m", "15m", "30m",
+  "1h", "2h", "4h", "6h", "8h",
+  "1d",
+] as const;
+```
+
+---
+
+## ICandleDto — Write Interface
+
+`ICandleDto` is the data-transfer object used when creating a new candle document. All fields are required.
+
+<ResponseField name="symbol" type="string" required>
+  The trading pair symbol, e.g. `"BTCUSDT"`.
+</ResponseField>
+
+<ResponseField name="interval" type="CandleInterval" required>
+  One of the `INTERVAL_ENUM` values: `"1m"` | `"3m"` | `"5m"` | `"15m"` | `"30m"` | `"1h"` | `"2h"` | `"4h"` | `"6h"` | `"8h"` | `"1d"`.
+</ResponseField>
+
+<ResponseField name="timestamp" type="number" required>
+  Unix timestamp in milliseconds for the candle open time.
+</ResponseField>
+
+<ResponseField name="open" type="number" required>
+  Opening price of the candle.
+</ResponseField>
+
+<ResponseField name="high" type="number" required>
+  Highest price during the candle period.
+</ResponseField>
+
+<ResponseField name="low" type="number" required>
+  Lowest price during the candle period.
+</ResponseField>
+
+<ResponseField name="close" type="number" required>
+  Closing price of the candle.
+</ResponseField>
+
+<ResponseField name="volume" type="number" required>
+  Traded volume during the candle period.
+</ResponseField>
+
+---
+
+## ICandleRow — Read Interface
+
+`ICandleRow` extends `ICandleDto` with fields added by Mongoose after a document is persisted.
+
+<ResponseField name="id" type="string">
+  String-serialized MongoDB `_id` (via `readTransform`).
+</ResponseField>
+
+<ResponseField name="exchangeName" type="string">
+  Always `"ccxt_binance"` — hardcoded by `CandleDbService`. See [EXCHANGE_NAME constant](#exchange_name-constant) below.
+</ResponseField>
+
+<ResponseField name="createDate" type="Date">
+  Document creation timestamp, mapped from Mongoose `timestamps.createdAt`.
+</ResponseField>
+
+<ResponseField name="updatedDate" type="Date">
+  Last-update timestamp, mapped from Mongoose `timestamps.updatedAt`.
+</ResponseField>
+
+---
+
+## Compound Unique Index
+
+```typescript
+CandleSchema.index({ symbol: 1, interval: 1, timestamp: 1 }, { unique: true });
+```
+
+The schema enforces a compound unique index on `{ symbol, interval, timestamp }`. This guarantees no duplicate candles per symbol/interval/timestamp combination, regardless of how many times `cacheCandles()` is called for overlapping ranges.
+
+---
+
+## EXCHANGE_NAME Constant
+
+```typescript
+const EXCHANGE_NAME = "ccxt_binance";
+```
+
+`CandleDbService` hardcodes `exchangeName` to `"ccxt_binance"` for all writes and all lookups. The `exchangeName` field is included in the Mongoose filter for `findBySymbolIntervalTimestamp` to prevent cross-exchange collisions if the schema is ever reused for a different exchange.
+
+---
+
+## CandleDbService
+
+`CandleDbService` extends `BaseCRUD(CandleModel)` and adds three candle-specific methods on top of the inherited CRUD operations.
+
+```typescript
+// packages/core/src/lib/services/db/CandleDbService.ts
+import BaseCRUD from "../../common/BaseCRUD";
+import { ICandleDto, ICandleRow, CandleModel } from "../../../schema/Candle.schema";
+import { readTransform } from "../../../utils/readTransform";
+import { inject } from "../../core/di";
+import { TYPES } from "../../core/types";
+import { LoggerService } from "../base/LoggerService";
+import { CandleInterval } from "backtest-kit";
+
+const EXCHANGE_NAME = "ccxt_binance";
+
+export class CandleDbService extends BaseCRUD(CandleModel) {
+  readonly loggerService = inject<LoggerService>(TYPES.loggerService);
+
+  public create = async (dto: ICandleDto): Promise<ICandleRow> => {
+    this.loggerService.log("candleDbService create", { dto });
+    const filter = {
+      symbol: dto.symbol,
+      interval: dto.interval,
+      timestamp: dto.timestamp,
+    };
+    const insertOnly = {
+      exchangeName: EXCHANGE_NAME,
+      open: dto.open,
+      high: dto.high,
+      low: dto.low,
+      close: dto.close,
+      volume: dto.volume,
+    };
+    const document = await CandleModel.findOneAndUpdate(
+      filter,
+      { $setOnInsert: insertOnly },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+    const result = readTransform(document.toJSON()) as unknown as ICandleRow;
+    return result;
+  };
+
+  public hasCandle = async (
+    symbol: string,
+    interval: CandleInterval,
+    timestamp: number,
+  ): Promise<boolean> => {
+    this.loggerService.log("candleDbService hasCandle", { symbol, interval, timestamp });
+    const candle = await this.findBySymbolIntervalTimestamp(symbol, interval, timestamp);
+    return !!candle;
+  };
+
+  public findBySymbolIntervalTimestamp = async (
+    symbol: string,
+    interval: CandleInterval,
+    timestamp: number,
+  ): Promise<ICandleRow | null> => {
+    this.loggerService.log("candleDbService findBySymbolIntervalTimestamp", {
+      symbol,
+      interval,
+      timestamp,
+    });
+    return await super.findByFilter({ symbol, interval, exchangeName: EXCHANGE_NAME, timestamp });
+  };
+}
+
+export default CandleDbService;
+```
+
+### CandleDbService Methods
+
+<ResponseField name="create(dto)" type="(dto: ICandleDto) => Promise<ICandleRow>">
+  Upserts a candle using `findOneAndUpdate` with `$setOnInsert`. The filter is `{ symbol, interval, timestamp }` — if a matching document already exists it is returned unchanged. This makes `create` fully idempotent and safe to call multiple times for the same candle (e.g. during overlapping `cacheCandles` calls).
+</ResponseField>
+
+<ResponseField name="hasCandle(symbol, interval, timestamp)" type="(symbol: string, interval: CandleInterval, timestamp: number) => Promise<boolean>">
+  Convenience wrapper around `findBySymbolIntervalTimestamp`. Returns `true` if a candle exists for the given `symbol`, `interval`, and `timestamp`, otherwise `false`.
+</ResponseField>
+
+<ResponseField name="findBySymbolIntervalTimestamp(symbol, interval, timestamp)" type="(symbol: string, interval: CandleInterval, timestamp: number) => Promise<ICandleRow | null>">
+  Exact lookup by `{ symbol, interval, exchangeName: 'ccxt_binance', timestamp }`. Returns the `ICandleRow` document or `null` if not found. Delegates to `BaseCRUD.findByFilter()`.
+</ResponseField>
+
+### Inherited BaseCRUD Methods
+
+<Expandable title="BaseCRUD inherited methods">
+  <ResponseField name="update(id, dto)" type="(id: string, dto: object) => Promise<ICandleRow>">
+    Updates a document by `_id`. Throws if the document is not found. Strips the `id` field from `dto` before writing.
+  </ResponseField>
+
+  <ResponseField name="findById(id)" type="(id: string) => Promise<ICandleRow>">
+    Finds a document by `_id`. Throws if not found.
+  </ResponseField>
+
+  <ResponseField name="findByFilter(filterData, sort?)" type="(filterData: object, sort?: object) => Promise<ICandleRow | null>">
+    Finds the first document matching `filterData`. Returns `null` if not found.
+  </ResponseField>
+
+  <ResponseField name="findAll(filterData?, limit?)" type="(filterData?: object, limit?: number) => Promise<ICandleRow[]>">
+    Returns up to `limit` documents (default 1,000) sorted by `date` descending.
+  </ResponseField>
+
+  <ResponseField name="iterate(filterData?, sort?)" type="AsyncGenerator<ICandleRow>">
+    Async generator that yields documents one at a time — avoids loading the entire result set into memory.
+  </ResponseField>
+
+  <ResponseField name="paginate(filterData, pagination, sort?)" type="Promise<{ rows: ICandleRow[], total: number }>">
+    Returns a paginated result with `rows` (the page) and `total` (the full count matching `filterData`).
+  </ResponseField>
+</Expandable>
+
+---
+
+## Full Schema Source
+
+```typescript
+// packages/core/src/schema/Candle.schema.ts
+import { CandleInterval } from "backtest-kit";
+import mongoose, { Document, Schema } from "mongoose";
+
+const INTERVAL_ENUM = [
+  "1m", "3m", "5m", "15m", "30m",
+  "1h", "2h", "4h", "6h", "8h",
+  "1d",
+] as const;
+
+interface ICandleDto {
+  symbol: string;
+  interval: CandleInterval;
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+interface CandleDocument extends ICandleDto, Document {
+  exchangeName: string;
+}
+
+interface ICandleRow extends ICandleDto {
+  id: string;
+  exchangeName: string;
+  createDate: Date;
+  updatedDate: Date;
+}
+
+const CandleSchema: Schema<CandleDocument> = new Schema(
+  {
+    symbol: { type: String, required: true, index: true },
+    interval: { type: String, required: true, enum: INTERVAL_ENUM, index: true },
+    timestamp: { type: Number, required: true, index: true },
+    exchangeName: { type: String, required: true, index: true },
+    open: { type: Number, required: true },
+    high: { type: Number, required: true },
+    low: { type: Number, required: true },
+    close: { type: Number, required: true },
+    volume: { type: Number, required: true },
+  },
+  { timestamps: { createdAt: "createDate", updatedAt: "updatedDate" } }
+);
+
+CandleSchema.index({ symbol: 1, interval: 1, timestamp: 1 }, { unique: true });
+
+const CandleModel = mongoose.model<CandleDocument>("candle-example-items", CandleSchema);
+
+export { CandleModel, ICandleDto, ICandleRow };
+```

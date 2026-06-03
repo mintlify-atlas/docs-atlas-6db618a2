@@ -1,0 +1,303 @@
+---
+title: "@pro/core Built-in Services: Logger, Scraper, Parser, Screen"
+sidebarTitle: "Services"
+description: "API reference for the four built-in @pro/core services: LoggerService, ScraperService, ParserService, and CryptoYodaScreenService."
+---
+
+`@pro/core` ships four injectable services that are accessible anywhere in the monorepo via `globalThis.core` — a structured async logger, a Telegram MTProto scraper for pulling raw channel messages, a regex-based parser that maps those messages to typed fields, and a pre-built crypto signal screener wired to the `crypto_yoda_channel` Telegram channel.
+
+<Note>
+  All four services are lazy-initialized via the DI container — their constructors are invoked on first access (i.e., when `inject()` is called for a given token), not at module load time.
+</Note>
+
+---
+
+## LoggerService
+
+**Accessed via** `core.loggerService`
+
+`LoggerService` is a thin async wrapper that delegates to a pluggable `ILogger` implementation. Out of the box the underlying logger is `NOOP_LOGGER` — every method is a no-op — so the library is completely silent unless you opt in by calling `setLogger()`.
+
+```typescript
+interface ILogger {
+  log(topic: string, ...args: any[]): void;
+  debug(topic: string, ...args: any[]): void;
+  info(topic: string, ...args: any[]): void;
+  warn(topic: string, ...args: any[]): void;
+}
+```
+
+### Methods
+
+<Accordion title="log()">
+
+```typescript
+log(topic: string, ...args: any[]): Promise<void>
+```
+
+General-purpose log. Forwards `topic` and any additional `args` to the underlying `ILogger.log` implementation.
+
+<ParamField path="topic" type="string" required>
+  A short label that identifies the originating service or operation (e.g. `"candleDbService create"`).
+</ParamField>
+
+<ParamField path="...args" type="any[]">
+  Any additional structured data to attach to the log entry.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="debug()">
+
+```typescript
+debug(topic: string, ...args: any[]): Promise<void>
+```
+
+Debug-level log. Same signature as `log()`.
+
+</Accordion>
+
+<Accordion title="info()">
+
+```typescript
+info(topic: string, ...args: any[]): Promise<void>
+```
+
+Info-level log. Used internally by `BaseCRUD` and `BaseMap` for every operation.
+
+</Accordion>
+
+<Accordion title="warn()">
+
+```typescript
+warn(topic: string, ...args: any[]): Promise<void>
+```
+
+Warning-level log. Same signature as `log()`.
+
+</Accordion>
+
+<Accordion title="setLogger()">
+
+```typescript
+setLogger(logger: ILogger): void
+```
+
+Replaces the underlying logger implementation. Call this once during application bootstrap to route log output to your preferred sink (console, file, remote service, etc.).
+
+<ParamField path="logger" type="ILogger" required>
+  Any object implementing `{ log, debug, info, warn }`. The implementation may be synchronous or asynchronous.
+</ParamField>
+
+</Accordion>
+
+**Enabling logs at startup:**
+
+```typescript
+core.loggerService.setLogger({
+  log:   (topic, ...args) => console.log("[LOG]",   topic, ...args),
+  debug: (topic, ...args) => console.debug("[DEBUG]", topic, ...args),
+  info:  (topic, ...args) => console.info("[INFO]",  topic, ...args),
+  warn:  (topic, ...args) => console.warn("[WARN]",  topic, ...args),
+});
+```
+
+---
+
+## ScraperService
+
+**Accessed via** `core.scraperService`
+
+`ScraperService` connects to Telegram via MTProto (`getTelegram()` from `config/telegram.ts`) and iterates messages in a given channel for a given calendar day in UTC.
+
+### scrapeDay()
+
+```typescript
+scrapeDay(channel: string, date: Date): Promise<ScraperMessage[]>
+```
+
+Fetches all messages posted to `channel` on the UTC calendar day represented by `date` — from `00:00:00.000 UTC` to `23:59:59.999 UTC`.
+
+<ParamField path="channel" type="string" required>
+  The Telegram channel username or ID (e.g. `"crypto_yoda_channel"`).
+</ParamField>
+
+<ParamField path="date" type="Date" required>
+  Any `Date` whose UTC date components identify the day to scrape. Time components are ignored — the method normalises to midnight UTC internally.
+</ParamField>
+
+**Returns** `Promise<ScraperMessage[]>` — messages in reverse-chronological order as received from the Telegram API, filtered to the requested day.
+
+<ResponseField name="ScraperMessage.id" type="number">
+  Telegram message ID.
+</ResponseField>
+
+<ResponseField name="ScraperMessage.content" type="string">
+  Raw text body of the message.
+</ResponseField>
+
+<ResponseField name="ScraperMessage.channel" type="string">
+  The channel name as passed to `scrapeDay`.
+</ResponseField>
+
+<ResponseField name="ScraperMessage.date" type="Date">
+  Message timestamp reconstructed from the Telegram UNIX epoch.
+</ResponseField>
+
+**Example:**
+
+```typescript
+const messages = await core.scraperService.scrapeDay(
+  "crypto_yoda_channel",
+  new Date("2024-03-01"),
+);
+console.log(`Fetched ${messages.length} messages`);
+```
+
+<Warning>
+  `ScraperService` requires a valid Telegram MTProto session. Run your application with `--session` mode first to authenticate and persist the session file before calling `scrapeDay()`.
+</Warning>
+
+---
+
+## ParserService
+
+**Accessed via** `core.parserService`
+
+`ParserService` applies a declarative regex-based field mapping to an array of `ScraperMessage` objects and returns each message augmented with a `data` field — `null` if the message did not match all required fields, or a typed extracted object if it did.
+
+### parseDay()
+
+```typescript
+parseDay<M extends FieldMapping>(
+  messages: ScraperMessage[],
+  format: M,
+): Promise<ParserMessageRaw<M>[]>
+```
+
+<ParamField path="messages" type="ScraperMessage[]" required>
+  The raw messages to parse, typically the output of `scraperService.scrapeDay()`.
+</ParamField>
+
+<ParamField path="format" type="M extends FieldMapping" required>
+  A field-mapping object where each key maps to either a bare `RegExp` or a full `ExtractConfig` descriptor.
+</ParamField>
+
+**Returns** `Promise<ParserMessageRaw<M>[]>` — the original messages with an added `data` field.
+
+<ResponseField name="ParserMessageRaw.data" type="ExtractedData<M> | null">
+  `null` if any non-optional field failed to match. Otherwise an object whose keys and value types are inferred from `M`.
+</ResponseField>
+
+### FieldMapping and ExtractConfig
+
+A `FieldMapping` is a plain object where each value is either a `RegExp` (shorthand — extracts capture group 1 as a string) or a full `ExtractConfig`:
+
+```typescript
+type ExtractConfig<T = string> = {
+  pattern:    RegExp;
+  group?:     number;               // capture group index; defaults to 1
+  transform?: (raw: string, match: RegExpMatchArray) => T;
+  validate?:  (value: T) => boolean;
+  multi?:     boolean;              // use matchAll; pattern must have /g flag
+  optional?:  boolean;              // skip field if no match instead of returning null
+};
+```
+
+**Example custom format:**
+
+```typescript
+import { ParseFormat } from "@pro/core";
+
+type AlertFields = {
+  symbol:    string;
+  threshold: number;
+};
+
+const ALERT_FORMAT: ParseFormat<AlertFields> = {
+  symbol:    { pattern: /\$([A-Z]+)/, group: 1 },
+  threshold: {
+    pattern:   /above\s+([\d.]+)/i,
+    transform: (raw) => parseFloat(raw),
+    validate:  (v) => v > 0,
+  },
+};
+
+const parsed = await core.parserService.parseDay(messages, ALERT_FORMAT);
+// parsed[n].data is AlertFields | null
+```
+
+---
+
+## CryptoYodaScreenService
+
+**Accessed via** `core.cryptoYodaScreenService`
+
+`CryptoYodaScreenService` is a pre-built screener that combines `ScraperService` and `ParserService` to extract structured trading signals from the `crypto_yoda_channel` Telegram channel. The hard-coded `SIGNAL_FORMAT` parses Russian-language signal messages into a typed `SignalFields` object.
+
+### SignalFields
+
+```typescript
+type SignalFields = {
+  symbol:    string;                       // e.g. "BTC"
+  direction: "short" | "long";
+  entry:     { from: number; to: number }; // entry price zone
+  targets:   number[];                     // one or more take-profit prices
+  stoploss:  number;                       // stop-loss price
+};
+```
+
+### screenDay()
+
+```typescript
+screenDay(date: Date): Promise<ParserMessageRaw<SignalFields>[]>
+```
+
+Scrapes the full day of messages from `crypto_yoda_channel` for the given UTC date and applies the `SIGNAL_FORMAT` parser in a single call.
+
+<ParamField path="date" type="Date" required>
+  The UTC calendar day to screen. Internally delegates to `scraperService.scrapeDay("crypto_yoda_channel", date)`.
+</ParamField>
+
+**Returns** `Promise<ParserMessageRaw<SignalFields>[]>` — every message from the channel that day, each with a `data` field that is either a parsed `SignalFields` object or `null` if the message was not a recognisable signal.
+
+**Example:**
+
+```typescript
+const signals = await core.cryptoYodaScreenService.screenDay(new Date("2024-03-01"));
+
+const validSignals = signals.filter((m) => m.data !== null);
+for (const signal of validSignals) {
+  console.log(signal.data!.symbol, signal.data!.direction, signal.data!.entry);
+}
+```
+
+---
+
+### parseDay()
+
+```typescript
+parseDay(scraperList: ScraperMessage[]): Promise<ParserMessageRaw<SignalFields>[]>
+```
+
+Parses a pre-fetched list of messages using the same `SIGNAL_FORMAT`. Use this overload when you have already retrieved messages via `scraperService.scrapeDay()` and want to avoid a second Telegram round-trip.
+
+<ParamField path="scraperList" type="ScraperMessage[]" required>
+  Messages already fetched from the Telegram API.
+</ParamField>
+
+**Returns** the same shape as `screenDay()`.
+
+```typescript
+// Fetch once, parse separately
+const raw = await core.scraperService.scrapeDay("crypto_yoda_channel", date);
+
+// Inspect raw messages before parsing
+console.log("Raw message count:", raw.length);
+
+const parsed = await core.cryptoYodaScreenService.parseDay(raw);
+```
+
+<Tip>
+  Use `parseDay()` in combination with `scraperService.scrapeDay()` when you want to cache or inspect raw messages independently of the parsing step.
+</Tip>

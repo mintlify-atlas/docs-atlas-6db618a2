@@ -1,0 +1,360 @@
+---
+title: "@pro/main Entry Point Modules: backtest, live, paper, session"
+sidebarTitle: "Entry Points"
+description: "Reference for the four @pro/main entry point modules — each gates on a CLI flag and executes a distinct runtime mode for backtesting or live trading."
+---
+
+`@pro/main` contains four self-contained mode modules, each exporting an async `main()` function. Every `main()` early-returns unless its required CLI flags are set, so all four modules can be imported unconditionally from `packages/main/src/index.ts` — only the one whose flags match will actually run.
+
+```typescript
+// packages/main/src/index.ts
+import "./main/session";
+import "./main/backtest";
+import "./main/live";
+import "./main/paper";
+```
+
+---
+
+## backtest.ts — `--backtest --entry`
+
+`backtest.ts` is the parallel backtesting entry point. It requires both `--entry` and `--backtest` to be set. After verifying schema registrations it optionally pre-warms MongoDB with historical candles, then fans out a `Backtest.background()` worker for every symbol in `CC_SYMBOL_LIST`.
+
+<ResponseField name="Required flags" type="boolean">
+  `values.entry && values.backtest` — returns immediately if either is `false`.
+</ResponseField>
+
+<ResponseField name="waitForReady(true)" type="async">
+  Passes `true` to wait for full DI container readiness **and** backtest schema registration before proceeding.
+</ResponseField>
+
+<ResponseField name="listStrategySchema()" type="async">
+  Returns the registered strategy schema array. Throws `"Strategy not specified"` if the array is empty.
+</ResponseField>
+
+<ResponseField name="listExchangeSchema()" type="async">
+  Returns the registered exchange schema array. Throws `"Exchange not specified"` if the array is empty.
+</ResponseField>
+
+<ResponseField name="listFrameSchema()" type="async">
+  Returns the registered frame (date range) schema array. Throws `"Frame not specified"` if the array is empty.
+</ResponseField>
+
+<ResponseField name="--cache (optional)" type="boolean">
+  When set, runs `CACHE_CANDLES_FN` before the symbol loop to pre-warm MongoDB with `1m` OHLCV candles for the exchange's full `startDate`–`endDate` range.
+</ResponseField>
+
+<ResponseField name="Backtest.background(symbol, opts)" type="async per symbol">
+  Spawns a background backtest worker for each `symbol` in `CC_SYMBOL_LIST` with `{ exchangeName, strategyName, frameName }`.
+</ResponseField>
+
+```typescript
+// packages/main/src/main/backtest.ts
+import { CC_SYMBOL_LIST } from "../config/params";
+import { getArgs } from "../helpers/getArgs";
+import {
+  Backtest,
+  waitForReady,
+  listStrategySchema,
+  listExchangeSchema,
+  listFrameSchema,
+  cacheCandles,
+} from "backtest-kit";
+
+const CACHE_CANDLES_FN = async () => {
+  const [exchangeSchema] = await listExchangeSchema();
+  const [frameSchema] = await listFrameSchema();
+  for (const symbol of CC_SYMBOL_LIST) {
+    await cacheCandles({
+      exchangeName: exchangeSchema.exchangeName,
+      from: frameSchema.startDate,
+      to: frameSchema.endDate,
+      interval: "1m",
+      symbol,
+    });
+  }
+};
+
+const main = async () => {
+  const { values } = getArgs();
+
+  if (!values.entry) {
+    return;
+  }
+
+  if (!values.backtest) {
+    return;
+  }
+
+  await waitForReady(true);
+
+  const [strategySchema] = await listStrategySchema();
+
+  if (!strategySchema) {
+    throw new Error("Strategy not specified");
+  }
+
+  const [exchangeSchema] = await listExchangeSchema();
+
+  if (!exchangeSchema) {
+    throw new Error("Exchange not specified");
+  }
+
+  const [frameSchema] = await listFrameSchema();
+
+  if (!frameSchema) {
+    throw new Error("Frame not specified");
+  }
+
+  if (values.cache) {
+    await CACHE_CANDLES_FN();
+  }
+
+  for (const symbol of CC_SYMBOL_LIST) {
+    Backtest.background(symbol, {
+      exchangeName: exchangeSchema.exchangeName,
+      strategyName: strategySchema.strategyName,
+      frameName: frameSchema.frameName,
+    });
+  }
+};
+
+main();
+```
+
+---
+
+## live.ts — `--live --entry`
+
+`live.ts` connects to a live exchange and runs the strategy in real time. It requires both `--entry` and `--live`. Unlike backtest mode it passes `false` to `waitForReady()` — live mode does not need the backtest schema pipeline to be initialized.
+
+<Note>
+  Live mode does not accept a `--cache` flag and does not require `frameName` — the exchange streams real-time candles, so no historical frame is needed.
+</Note>
+
+<ResponseField name="Required flags" type="boolean">
+  `values.entry && values.live`
+</ResponseField>
+
+<ResponseField name="waitForReady(false)" type="async">
+  Passes `false` — skips waiting for backtest-specific schema readiness.
+</ResponseField>
+
+<ResponseField name="Live.background(symbol, opts)" type="async per symbol">
+  Spawns a background live-trading worker for each `symbol` with `{ exchangeName, strategyName }`. No `frameName` is required.
+</ResponseField>
+
+```typescript
+// packages/main/src/main/live.ts
+import { CC_SYMBOL_LIST } from "../config/params";
+import { getArgs } from "../helpers/getArgs";
+import {
+  listExchangeSchema,
+  listStrategySchema,
+  Live,
+  waitForReady,
+} from "backtest-kit";
+
+const main = async () => {
+  const { values } = getArgs();
+
+  if (!values.entry) {
+    return;
+  }
+
+  if (!values.live) {
+    return;
+  }
+
+  await waitForReady(false);
+
+  const [strategySchema] = await listStrategySchema();
+
+  if (!strategySchema) {
+    throw new Error("Strategy not specified");
+  }
+
+  const [exchangeSchema] = await listExchangeSchema();
+
+  if (!exchangeSchema) {
+    throw new Error("Exchange not specified");
+  }
+
+  for (const symbol of CC_SYMBOL_LIST) {
+    Live.background(symbol, {
+      exchangeName: exchangeSchema.exchangeName,
+      strategyName: strategySchema.strategyName,
+    });
+  }
+};
+
+main();
+```
+
+---
+
+## paper.ts — `--paper --entry`
+
+`paper.ts` is structurally identical to `live.ts` but gates on `values.paper` instead of `values.live`. It consumes live market data from the exchange but simulates order fills without placing real orders — useful for validating a strategy before going live.
+
+<ResponseField name="Required flags" type="boolean">
+  `values.entry && values.paper`
+</ResponseField>
+
+<ResponseField name="waitForReady(false)" type="async">
+  Same as live mode — passes `false` to skip backtest schema readiness.
+</ResponseField>
+
+<ResponseField name="Live.background(symbol, opts)" type="async per symbol">
+  Paper trading reuses the same `Live.background()` call as live mode. The simulated-fill behaviour is controlled by the persistence adapter configuration in `setup.config.ts`, not by a different background function.
+</ResponseField>
+
+```typescript
+// packages/main/src/main/paper.ts
+import { CC_SYMBOL_LIST } from "../config/params";
+import { getArgs } from "../helpers/getArgs";
+import {
+  listExchangeSchema,
+  listStrategySchema,
+  Live,
+  waitForReady,
+} from "backtest-kit";
+
+const main = async () => {
+  const { values } = getArgs();
+
+  if (!values.entry) {
+    return;
+  }
+
+  if (!values.paper) {
+    return;
+  }
+
+  await waitForReady(false);
+
+  const [strategySchema] = await listStrategySchema();
+
+  if (!strategySchema) {
+    throw new Error("Strategy not specified");
+  }
+
+  const [exchangeSchema] = await listExchangeSchema();
+
+  if (!exchangeSchema) {
+    throw new Error("Exchange not specified");
+  }
+
+  for (const symbol of CC_SYMBOL_LIST) {
+    Live.background(symbol, {
+      exchangeName: exchangeSchema.exchangeName,
+      strategyName: strategySchema.strategyName,
+    });
+  }
+};
+
+main();
+```
+
+---
+
+## session.ts — `--session`
+
+`session.ts` handles Telegram MTProto authentication. It does not require `--entry`. When `--session` is set it creates a `TelegramClient` from the `gram.js` library, displays a QR code in the terminal using `qrcode-terminal`, and saves the resulting session string to `./session.txt` for use by `ScraperService`.
+
+<ResponseField name="Required flag" type="boolean">
+  `values.session` — returns immediately if `false`.
+</ResponseField>
+
+<ResponseField name="CC_TELEGRAM_API_ID" type="number">
+  Read from `process.env.CC_TELEGRAM_API_ID`. Falls back to the default value in `params.ts`.
+</ResponseField>
+
+<ResponseField name="CC_TELEGRAM_API_HASH" type="string">
+  Read from `process.env.CC_TELEGRAM_API_HASH`. Falls back to the default value in `params.ts`.
+</ResponseField>
+
+<ResponseField name="client.signInUserWithQrCode()" type="async">
+  Renders a `tg://login?token=...` QR code in the terminal. Prompts for a 2FA password via `readline` if required. Calls `onError` with a `false` return to abort without rethrowing.
+</ResponseField>
+
+<ResponseField name="./session.txt" type="output file">
+  The serialized `StringSession` string is written here after a successful login. Pass this value as `CC_TELEGRAM_SESSION` to subsequent runs so `ScraperService` can reuse the authenticated session.
+</ResponseField>
+
+<Warning>
+  The session string gives full read access to the authenticated Telegram account. Do not commit `./session.txt` to version control.
+</Warning>
+
+```typescript
+// packages/main/src/main/session.ts
+import { TelegramClient } from "telegram";
+import { StringSession } from "telegram/sessions";
+import readline from "readline";
+import { writeFile } from "fs/promises";
+import qrcodeTerminal from "qrcode-terminal";
+import { CC_TELEGRAM_API_HASH, CC_TELEGRAM_API_ID } from "../config/params";
+import { getArgs } from "../helpers/getArgs";
+
+const main = async () => {
+  const { values } = getArgs();
+
+  if (!values.session) {
+    return;
+  }
+
+  const stringSession = new StringSession("");
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  const client = new TelegramClient(
+    stringSession,
+    CC_TELEGRAM_API_ID,
+    CC_TELEGRAM_API_HASH,
+    {
+      connectionRetries: 5,
+      systemVersion: "Windows 10",
+      deviceModel: "Desktop",
+      appVersion: "1.0.0",
+    }
+  );
+
+  await client.connect();
+
+  await client.signInUserWithQrCode(
+    { apiId: CC_TELEGRAM_API_ID, apiHash: CC_TELEGRAM_API_HASH },
+    {
+      qrCode: async ({ token }) => {
+        const url = `tg://login?token=${token.toString("base64url")}`;
+        console.clear();
+        console.log(
+          "Scan this QR code in Telegram app (Settings -> Devices -> Link Desktop Device):\n"
+        );
+        qrcodeTerminal.generate(url, { small: true });
+      },
+      password: async () =>
+        new Promise((resolve) =>
+          rl.question("Enter your 2FA password: ", resolve)
+        ),
+      onError: async (err) => {
+        console.error(err.message);
+        return false;
+      },
+    }
+  );
+
+  console.log("Connected!");
+  {
+    const sessionString = stringSession.save();
+    await writeFile("./session.txt", sessionString, "utf-8");
+  }
+  console.log("Session saved to ./session.txt");
+
+  rl.close();
+};
+
+main();
+```

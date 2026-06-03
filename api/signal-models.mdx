@@ -1,0 +1,151 @@
+---
+title: "ScraperMessage and Signal Data Models"
+sidebarTitle: "Signal Models"
+description: "TypeScript interfaces for ScraperMessage, ParserMessageRaw, and the SignalEntry model used by the CryptoYoda screener and parser pipeline."
+---
+
+The scraper/parser pipeline is typed through three model interfaces. `ScraperMessage` represents a raw Telegram message as fetched by `ScraperService`. `ParserMessageRaw<M>` wraps a `ScraperMessage` with a typed `data` field containing fields extracted by `ParserService`. `SignalEntryModel` is the fully-structured signal produced when `CryptoYodaScreenService` applies the `SIGNAL_FORMAT` parse format to a day's messages.
+
+---
+
+## ScraperMessage
+
+`ScraperMessage` is the raw output of `ScraperService.scrapeDay()`. Every field maps directly to properties on a `gram.js` `Message` object.
+
+```typescript
+// packages/core/src/model/ScraperMessage.model.ts
+export interface ScraperMessage {
+  id: number;
+  channel: string;
+  content: string;
+  date: Date;
+}
+```
+
+<ResponseField name="id" type="number">
+  The Telegram message ID, taken from `message.id`. Unique within a channel.
+</ResponseField>
+
+<ResponseField name="channel" type="string">
+  The channel username or peer identifier passed to `scrapeDay()` (e.g. `"crypto_yoda_channel"`).
+</ResponseField>
+
+<ResponseField name="content" type="string">
+  The full plaintext body of the message, taken from `message.message`.
+</ResponseField>
+
+<ResponseField name="date" type="Date">
+  Message send time, converted from the Unix seconds timestamp on the Telegram message (`message.date * 1000`).
+</ResponseField>
+
+---
+
+## ParserMessageRaw\<M\>
+
+`ParserMessageRaw<M>` is the output of `ParserService.parseDay()`. It extends `ScraperMessage` with a `data` field that holds either the fully-extracted typed object or `null` when extraction failed.
+
+```typescript
+// packages/core/src/model/ParserMessage.model.ts
+import { ExtractedData, FieldMapping } from "./ParseFormat.model";
+import { ScraperMessage } from "./ScraperMessage.model";
+
+export interface ParserMessageRaw<M extends FieldMapping> extends ScraperMessage {
+  data: ExtractedData<M> | null;
+}
+
+export interface ParserMessageSuccess<M extends FieldMapping> extends ScraperMessage {
+  data: ExtractedData<M>;
+}
+```
+
+<ResponseField name="data" type="ExtractedData<M> | null">
+  The extracted typed fields when all required patterns matched, or `null` when any required field's pattern did not match (or its `validate()` function returned `false`). Filter for non-null `data` to get only successful parses.
+</ResponseField>
+
+<ResponseField name="ParserMessageSuccess<M>" type="interface">
+  A narrowed variant of `ParserMessageRaw<M>` where `data` is guaranteed non-null. Use this type after filtering out messages where `data === null`.
+</ResponseField>
+
+All other fields (`id`, `channel`, `content`, `date`) are inherited from `ScraperMessage` unchanged.
+
+---
+
+## SignalEntryModel
+
+`SignalEntryModel` is the typed shape of a fully-parsed CryptoYoda trade signal. It is the concrete type bound for `M` when `CryptoYodaScreenService` calls `ParserService.parseDay(messages, SIGNAL_FORMAT)`.
+
+```typescript
+// packages/core/src/model/SignalEntry.model.ts
+interface SignalEntryModel {
+  publishedAt: string;
+  symbol: string;
+  direction: "long" | "short";
+  entry: { from: number; to: number };
+  targets: number[];
+  stoploss: number;
+  note: string;
+}
+
+export { SignalEntryModel };
+```
+
+<ResponseField name="publishedAt" type="string">
+  ISO string representation of the signal publication time.
+</ResponseField>
+
+<ResponseField name="symbol" type="string">
+  The trading pair symbol extracted from the message, e.g. `"BTCUSDT"`. Derived from the `#SYMBOL/USDT` hashtag pattern.
+</ResponseField>
+
+<ResponseField name="direction" type='"long" | "short"'>
+  Trade direction — `"long"` for ЛОНГ signals, `"short"` for ШОРТ signals.
+</ResponseField>
+
+<ResponseField name="entry" type="{ from: number; to: number }">
+  The entry price zone as a `{ from, to }` range extracted from the message text. Both values are positive finite numbers with `from < to`.
+</ResponseField>
+
+<ResponseField name="targets" type="number[]">
+  Array of take-profit price targets extracted with the `multi: true` pattern. At least one target is required for the message to parse successfully.
+</ResponseField>
+
+<ResponseField name="stoploss" type="number">
+  Stop-loss price level extracted from the `СТОП-ЛОСС:` line. Must be a positive finite number.
+</ResponseField>
+
+<ResponseField name="note" type="string">
+  Optional free-text note attached to the signal (not extracted by the parser — populated downstream).
+</ResponseField>
+
+---
+
+## Pipeline Flow
+
+The three interfaces connect in a linear pipeline inside `CryptoYodaScreenService`:
+
+```typescript
+// packages/core/src/lib/services/screen/CryptoYodaScreenService.ts (simplified)
+
+// Step 1 — fetch raw Telegram messages for a given day
+const scraperList: ScraperMessage[] = await scraperService.scrapeDay(
+  "crypto_yoda_channel",
+  date
+);
+
+// Step 2 — apply SIGNAL_FORMAT regex extraction to every message
+const parserList: ParserMessageRaw<SignalFields>[] = await parserService.parseDay(
+  scraperList,
+  SIGNAL_FORMAT
+);
+
+// Step 3 — filter to successful parses only
+const signals = parserList.filter((msg) => msg.data !== null);
+```
+
+1. **`ScraperService.scrapeDay(channel, date)`** — iterates Telegram messages for the channel on `date` and returns `ScraperMessage[]`.
+2. **`ParserService.parseDay(messages, format)`** — runs each message body through the `SIGNAL_FORMAT` field extractors and returns `ParserMessageRaw<SignalFields>[]`. Messages where any required field fails to match get `data: null`.
+3. **`CryptoYodaScreenService`** — wraps both steps. Call `screenDay(date)` for the full pipeline or `parseDay(scraperList)` if you already have scraped messages.
+
+<Note>
+  `CryptoYodaScreenService.parseDay()` accepts a pre-fetched `ScraperMessage[]` list, letting you reuse scraped data across multiple parse formats without re-fetching from Telegram.
+</Note>

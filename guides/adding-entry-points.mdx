@@ -1,0 +1,252 @@
+---
+title: "Adding a New Runtime Mode to @pro/main"
+sidebarTitle: "New Entry Points"
+description: "Create a custom execution mode in @pro/main by adding a CLI flag, a new mode file, and re-exporting it — all following the pattern of backtest.ts and live.ts."
+---
+
+`@pro/main` is the entry point hub for the monorepo. Each runtime mode — `backtest`, `live`, `paper`, `session` — is a self-contained file that gates on a specific CLI flag and early-returns if that flag is absent. Adding a new mode means adding one flag, one file, and one re-export: the Rollup config picks everything up automatically via the `index.ts` entry point.
+
+## The gate pattern
+
+Every mode file in `packages/main/src/main/` follows the same structure: define an async `main()` function, check the required flags at the top, early-return if either is absent, then proceed with mode logic. Here is `backtest.ts` in full:
+
+```typescript
+// packages/main/src/main/backtest.ts
+import { CC_SYMBOL_LIST } from "../config/params";
+import { getArgs } from "../helpers/getArgs";
+import {
+  Backtest,
+  waitForReady,
+  listStrategySchema,
+  listExchangeSchema,
+  listFrameSchema,
+  cacheCandles,
+} from "backtest-kit";
+
+const CACHE_CANDLES_FN = async () => {
+  const [exchangeSchema] = await listExchangeSchema();
+  const [frameSchema] = await listFrameSchema();
+  for (const symbol of CC_SYMBOL_LIST) {
+    await cacheCandles({
+      exchangeName: exchangeSchema.exchangeName,
+      from: frameSchema.startDate,
+      to: frameSchema.endDate,
+      interval: "1m",
+      symbol,
+    });
+  }
+};
+
+const main = async () => {
+  const { values } = getArgs();
+
+  if (!values.entry) { return; }    // ← gate 1: general entry guard
+  if (!values.backtest) { return; } // ← gate 2: mode-specific guard
+
+  await waitForReady(true);
+
+  const [strategySchema] = await listStrategySchema();
+  if (!strategySchema) { throw new Error("Strategy not specified"); }
+
+  const [exchangeSchema] = await listExchangeSchema();
+  if (!exchangeSchema) { throw new Error("Exchange not specified"); }
+
+  const [frameSchema] = await listFrameSchema();
+  if (!frameSchema) { throw new Error("Frame not specified"); }
+
+  if (values.cache) {
+    await CACHE_CANDLES_FN();
+  }
+
+  for (const symbol of CC_SYMBOL_LIST) {
+    Backtest.background(symbol, {
+      exchangeName: exchangeSchema.exchangeName,
+      strategyName: strategySchema.strategyName,
+      frameName: frameSchema.frameName,
+    });
+  }
+};
+
+main();
+```
+
+The two early-returns at the top are the entire gating mechanism — no `if/else` nesting, no shared state between modes.
+
+<Steps>
+
+  <Step title="Flag — add the CLI option to getArgs()">
+    Open `packages/main/src/helpers/getArgs.ts` and add your new flag to the `options` object. The full current options object is:
+
+    <CodeGroup>
+
+    ```typescript Before
+    // packages/main/src/helpers/getArgs.ts
+    import { singleshot } from "functools-kit";
+    import { parseArgs } from "util";
+
+    export const getArgs = singleshot(() => {
+      const { values } = parseArgs({
+        args: process.argv,
+        options: {
+          entry:   { type: "boolean", default: false },
+          backtest: { type: "boolean", default: false },
+          live:    { type: "boolean", default: false },
+          paper:   { type: "boolean", default: false },
+          session: { type: "boolean", default: false },
+          cache:   { type: "boolean", default: false },
+        },
+        strict: false,
+        allowPositionals: true,
+      });
+      return { values };
+    });
+    ```
+
+    ```typescript After
+    // packages/main/src/helpers/getArgs.ts
+    import { singleshot } from "functools-kit";
+    import { parseArgs } from "util";
+
+    export const getArgs = singleshot(() => {
+      const { values } = parseArgs({
+        args: process.argv,
+        options: {
+          entry:     { type: "boolean", default: false },
+          backtest:  { type: "boolean", default: false },
+          live:      { type: "boolean", default: false },
+          paper:     { type: "boolean", default: false },
+          session:   { type: "boolean", default: false },
+          cache:     { type: "boolean", default: false },
+          analytics: { type: "boolean", default: false }, // ← new flag
+        },
+        strict: false,
+        allowPositionals: true,
+      });
+      return { values };
+    });
+    ```
+
+    </CodeGroup>
+
+    `getArgs` is wrapped with `singleshot` from `functools-kit`, so `parseArgs` runs exactly once regardless of how many mode files call `getArgs()`. The new flag is available to all mode files after this change.
+  </Step>
+
+  <Step title="File — create the mode file">
+    Create `packages/main/src/main/analytics.ts`. Apply the same gate pattern as `backtest.ts` — check `values.entry` first, then check `values.analytics`:
+
+    ```typescript
+    // packages/main/src/main/analytics.ts
+    import { getArgs } from "../helpers/getArgs";
+    import { waitForReady, listStrategySchema, listFrameSchema } from "backtest-kit";
+
+    const main = async () => {
+      const { values } = getArgs();
+
+      if (!values.entry) { return; }     // ← gate 1: general entry guard
+      if (!values.analytics) { return; } // ← gate 2: mode-specific guard
+
+      await waitForReady(true);
+
+      const [strategySchema] = await listStrategySchema();
+      if (!strategySchema) { throw new Error("Strategy not specified"); }
+
+      const [frameSchema] = await listFrameSchema();
+      if (!frameSchema) { throw new Error("Frame not specified"); }
+
+      // ... analytics mode logic
+    };
+
+    main();
+    ```
+
+    Keep the file self-contained. Import only what the analytics mode needs — do not share mutable state with other mode files.
+  </Step>
+
+  <Step title="Export — add a side-effect import to index.ts">
+    Open `packages/main/src/index.ts` and add an import for the new mode file. The current file is:
+
+    <CodeGroup>
+
+    ```typescript Before
+    // packages/main/src/index.ts
+    import "./main/session";
+    import "./main/backtest";
+    import "./main/live";
+    import "./main/paper";
+    ```
+
+    ```typescript After
+    // packages/main/src/index.ts
+    import "./main/session";
+    import "./main/backtest";
+    import "./main/live";
+    import "./main/paper";
+    import "./main/analytics";
+    ```
+
+    </CodeGroup>
+
+    These are side-effect imports — they cause each mode file's top-level `main()` call to execute when the bundle is loaded. The gate guards in each file ensure only the matching modes actually run.
+  </Step>
+
+  <Step title="Build — regenerate the @pro/main bundle">
+    Run the workspace build to pick up the new mode file via Rollup:
+
+    ```bash
+    npm run build        # Linux / macOS
+    npm run build:win    # Windows
+    ```
+
+    The Rollup config uses `packages/main/src/index.ts` as its entry point, so it automatically includes `analytics.ts` because `index.ts` now imports it. No Rollup configuration changes are needed.
+  </Step>
+
+  <Step title="Run — invoke the new mode">
+    Pass the new flag on the command line alongside `--entry` and a strategy file path:
+
+    ```bash
+    npm run start -- --entry --analytics ./content/my.strategy/my.strategy.ts
+    ```
+
+    To also run `--cache` pre-warming in the same process:
+
+    ```bash
+    npm run start -- --entry --analytics --cache ./content/my.strategy/my.strategy.ts
+    ```
+
+    To run both `backtest` and `analytics` modes in one process (both `main()` functions fire):
+
+    ```bash
+    npm run start -- --entry --backtest --analytics ./content/my.strategy/my.strategy.ts
+    ```
+  </Step>
+
+</Steps>
+
+## Current index.ts and mode inventory
+
+For reference, the current `packages/main/src/index.ts` imports four modes as side effects:
+
+```typescript
+// packages/main/src/index.ts
+import "./main/session";
+import "./main/backtest";
+import "./main/live";
+import "./main/paper";
+```
+
+Each corresponds to a flag in `getArgs()` and a file under `packages/main/src/main/`. The table below shows the existing modes:
+
+| Flag | File | Purpose |
+|------|------|---------|
+| `--entry --backtest` | `backtest.ts` | Parallel runner across `CC_SYMBOL_LIST` via `Backtest.background()` |
+| `--entry --live` | `live.ts` | Live trading mode against a real exchange |
+| `--entry --paper` | `paper.ts` | Paper trading mode (simulated fills, live data) |
+| `--entry --session` | `session.ts` | Telegram MTProto session auth (QR code) |
+
+<Note>
+  All mode files must use early-return guards at the top of `main()` — not `if/else` nesting. This keeps each file independently readable: you can open `analytics.ts` and immediately see its guard conditions and its full logic without tracing control flow from an outer `if` block.
+</Note>
+
+<Tip>
+  Modes can coexist in a single process run. If you pass both `--backtest` and `--analytics`, both `main()` functions will execute because both gate checks pass. Gate carefully with mutual exclusion logic inside your mode if the two modes must not run simultaneously — for example, by checking `!values.backtest` as an additional early-return inside the analytics mode.
+</Tip>

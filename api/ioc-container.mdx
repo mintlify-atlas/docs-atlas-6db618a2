@@ -1,0 +1,202 @@
+---
+title: "@pro/core IoC Container and globalThis.core API"
+sidebarTitle: "IoC Container"
+description: "Reference for the @pro/core DI container: provide(), inject(), init(), the TYPES token map, and the globally-accessible ioc object on globalThis.core."
+---
+
+`@pro/core` exports a dependency-injection container built on `di-kit`'s `createActivator('pro')`, wiring every built-in service into a single typed object that is simultaneously exported as `ioc` and assigned to `globalThis.core` — so strategy files anywhere in the monorepo can access services without a single import statement.
+
+## createActivator('pro')
+
+The container is bootstrapped in `packages/core/src/lib/core/di.ts`:
+
+```typescript
+import { createActivator } from "di-kit";
+
+export const { init, inject, provide } = createActivator("pro");
+```
+
+The three returned functions cover the entire public surface of the container.
+
+### provide()
+
+```typescript
+provide(token: Symbol, factory: () => T): void
+```
+
+Registers a factory function for the given DI token. The factory is called lazily — only when `inject()` first resolves the token.
+
+<ParamField path="token" type="Symbol" required>
+  A unique symbol from the `TYPES` map that identifies the service.
+</ParamField>
+
+<ParamField path="factory" type="() => T" required>
+  A zero-argument factory that constructs and returns the service instance.
+</ParamField>
+
+### inject()
+
+```typescript
+inject<T>(token: Symbol): T
+```
+
+Lazily resolves a registered service. The first call for a given token invokes its factory and caches the result; subsequent calls return the same singleton instance.
+
+<ParamField path="token" type="Symbol" required>
+  The `TYPES` symbol for the service you want to resolve.
+</ParamField>
+
+### init()
+
+```typescript
+init(): void
+```
+
+Triggers eager initialization of all registered providers, ensuring every factory has been invoked and every singleton is live before any consumer code runs.
+
+<Note>
+  `init()` is called automatically at module load time via the `import './core/provide'` side effect in `packages/core/src/lib/index.ts`. You do not need to call it manually.
+</Note>
+
+---
+
+## TYPES
+
+`TYPES` is the canonical symbol token map defined in `packages/core/src/lib/core/types.ts`. Each symbol is the lookup key used with `provide()` and `inject()`.
+
+```typescript
+export const TYPES = {
+  // base services
+  loggerService:             Symbol('loggerService'),
+
+  // db services
+  candleDbService:           Symbol('candleDbService'),
+
+  // core services
+  scraperService:            Symbol('scraperService'),
+  parserService:             Symbol('parserService'),
+
+  // screen services
+  cryptoYodaScreenService:   Symbol('cryptoYodaScreenService'),
+};
+```
+
+<ResponseField name="TYPES.loggerService" type="Symbol">
+  Token for the `LoggerService` singleton.
+</ResponseField>
+
+<ResponseField name="TYPES.candleDbService" type="Symbol">
+  Token for the `CandleDbService` singleton.
+</ResponseField>
+
+<ResponseField name="TYPES.scraperService" type="Symbol">
+  Token for the `ScraperService` singleton.
+</ResponseField>
+
+<ResponseField name="TYPES.parserService" type="Symbol">
+  Token for the `ParserService` singleton.
+</ResponseField>
+
+<ResponseField name="TYPES.cryptoYodaScreenService" type="Symbol">
+  Token for the `CryptoYodaScreenService` singleton.
+</ResponseField>
+
+---
+
+## ioc
+
+`ioc` is the fully-typed service bag exported from `packages/core/src/lib/index.ts`. It is assembled by calling `inject<T>()` for each token, then spread into a single object.
+
+```typescript
+import "./core/provide";
+import { inject, init } from "./core/di";
+import TYPES from "./core/types";
+
+import LoggerService              from "./services/base/LoggerService";
+import ScraperService             from "./services/core/ScraperService";
+import ParserService              from "./services/core/ParserService";
+import CryptoYodaScreenService    from "./services/screen/CryptoYodaScreenService";
+import CandleDbService            from "./services/db/CandleDbService";
+
+const baseServices = {
+  loggerService: inject<LoggerService>(TYPES.loggerService),
+};
+
+const dbServices = {
+  candleDbService: inject<CandleDbService>(TYPES.candleDbService),
+};
+
+const coreServices = {
+  scraperService: inject<ScraperService>(TYPES.scraperService),
+  parserService:  inject<ParserService>(TYPES.parserService),
+};
+
+const screenServices = {
+  cryptoYodaScreenService: inject<CryptoYodaScreenService>(TYPES.cryptoYodaScreenService),
+};
+
+export const ioc = {
+  ...baseServices,
+  ...coreServices,
+  ...dbServices,
+  ...screenServices,
+};
+
+init();
+```
+
+<ResponseField name="ioc.loggerService" type="LoggerService">
+  General-purpose async logger. Defaults to a no-op implementation — call `setLogger()` to activate.
+</ResponseField>
+
+<ResponseField name="ioc.candleDbService" type="CandleDbService">
+  Mongoose-backed OHLCV candle store with atomic upsert support.
+</ResponseField>
+
+<ResponseField name="ioc.scraperService" type="ScraperService">
+  Telegram MTProto scraper for fetching a full day of channel messages.
+</ResponseField>
+
+<ResponseField name="ioc.parserService" type="ParserService">
+  Regex-based field extractor that maps raw Telegram messages to typed data.
+</ResponseField>
+
+<ResponseField name="ioc.cryptoYodaScreenService" type="CryptoYodaScreenService">
+  Pre-built screener for the `crypto_yoda_channel` Telegram signal channel.
+</ResponseField>
+
+---
+
+## globalThis.core
+
+After assembling `ioc`, `packages/core/src/lib/index.ts` assigns it to `globalThis` and declares the ambient type so TypeScript resolves it everywhere:
+
+```typescript
+declare global {
+  var core: typeof ioc;
+}
+
+Object.assign(globalThis, { core: ioc });
+```
+
+This means any file in the monorepo — including strategy files under `./content/` — can call services without any import:
+
+```typescript
+// content/my-strategy.ts  — no imports needed
+const hasData = await core.candleDbService.hasCandle(
+  "BTCUSDT",
+  "1h",
+  Date.now() - 3600_000,
+);
+
+const messages = await core.scraperService.scrapeDay(
+  "my_channel",
+  new Date("2024-01-15"),
+);
+```
+
+TypeScript types are resolved by mapping `@pro/core` → `packages/core/types.d.ts` in the root `tsconfig.json` paths config, so IDE auto-complete and strict type checking work out of the box.
+
+<Tip>
+  Because `globalThis.core` is a reference to the same `ioc` object, services obtained via `core.x` are the same singleton instances as those resolved with `inject(TYPES.x)`.
+</Tip>

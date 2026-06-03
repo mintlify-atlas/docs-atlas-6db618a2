@@ -1,0 +1,158 @@
+---
+title: "Defining a Backtest Time Frame with addFrameSchema"
+sidebarTitle: "Frame Schema"
+description: "Register a named time frame using addFrameSchema, specifying the candle interval, start date, and end date that drive the backtest replay window."
+---
+
+The frame schema defines the time window for a backtest replay. It tells the engine which candle interval to use, where historical time starts, and where it ends. Every candle fetched during a backtest run is bound by these three values, and the frame name is the lookup key that ties the schema to a specific `Backtest.background()` call.
+
+## Registering a Frame
+
+```typescript
+import { addFrameSchema } from "backtest-kit";
+
+addFrameSchema({
+  frameName: "apr_2026_frame",
+  interval: "1m",
+  startDate: new Date("2026-04-01T00:00:00Z"),
+  endDate: new Date("2026-04-27T00:00:00Z"),
+});
+```
+
+### Field Reference
+
+<CardGroup cols={2}>
+  <Card title="frameName" icon="tag">
+    Unique string identifier for this time frame. Referenced by `Backtest.background({ frameName })` and retrieved by `listFrameSchema()` in the runner entry point.
+  </Card>
+  <Card title="interval" icon="clock">
+    Candle granularity string. Determines how many candles are replayed per day and the frequency of `listenActivePing` callbacks.
+  </Card>
+  <Card title="startDate" icon="calendar-days">
+    ISO 8601 UTC `Date` marking the first candle to replay. Use midnight UTC to align with exchange OHLCV boundaries.
+  </Card>
+  <Card title="endDate" icon="calendar-check">
+    ISO 8601 UTC `Date` marking the last candle to replay. The engine stops issuing ticks after this timestamp is reached.
+  </Card>
+</CardGroup>
+
+## Supported Interval Values
+
+The following interval strings are accepted by backtest-kit, matching the `INTERVAL_ENUM` defined in `Candle.schema.ts`:
+
+```typescript
+type CandleInterval =
+  | "1m"   // 1 minute
+  | "3m"   // 3 minutes
+  | "5m"   // 5 minutes
+  | "15m"  // 15 minutes
+  | "30m"  // 30 minutes
+  | "1h"   // 1 hour
+  | "2h"   // 2 hours
+  | "4h"   // 4 hours
+  | "6h"   // 6 hours
+  | "8h"   // 8 hours
+  | "1d";  // 1 day
+```
+
+<Tip>
+  Use short frames (`1`–`3` days) during strategy development to keep iteration time under a minute. Expand to full historical windows only for production validation runs.
+</Tip>
+
+## Candle Count Calculation
+
+For the `apr_2026_frame`, the total replay volume is:
+
+| Dimension | Value |
+|---|---|
+| Window length | 27 days (`2026-04-01` → `2026-04-27`) |
+| Candles per symbol | 27 × 24 × 60 = **38,880** |
+| Symbols (`CC_SYMBOL_LIST`) | **9** (BTC, POL, ZEC, HYPE, XAUT, DOGE, SOL, PENGU, HBAR) |
+| Total candle ticks | 38,880 × 9 = **~350,000** |
+
+At the measured throughput of ~103 events/sec on a single Node process, a hot-cache full run (all 9 symbols, all 27 days) completes in a matter of minutes on commodity developer hardware.
+
+## How the Frame Is Used at Runtime
+
+The frame schema is consumed by `packages/main/src/main/backtest.ts`:
+
+<Steps>
+  <Step title="Schema validation">
+    After `waitForReady()`, the entry point calls `listStrategySchema()`, `listExchangeSchema()`, and `listFrameSchema()` in sequence. If any list is empty, it throws with an explicit message — e.g. `"Frame not specified"`.
+
+    ```typescript
+    const [frameSchema] = await listFrameSchema();
+    if (!frameSchema) {
+      throw new Error("Frame not specified");
+    }
+    ```
+  </Step>
+  <Step title="Optional candle pre-warming">
+    When the `--cache` flag is present, `cacheCandles()` iterates every symbol in `CC_SYMBOL_LIST` and writes the full OHLCV window into Mongo before the parallel runners start. This prevents any HTTP round-trips during the hot tick loop.
+
+    ```typescript
+    await cacheCandles({
+      exchangeName: exchangeSchema.exchangeName,
+      from: frameSchema.startDate,
+      to: frameSchema.endDate,
+      interval: "1m",
+      symbol,
+    });
+    ```
+  </Step>
+  <Step title="Parallel background runners">
+    `Backtest.background()` is called once per symbol, passing all three schema names. Every runner independently replays the same `frameName` window against the same `exchangeName`, in parallel inside a single Node process.
+
+    ```typescript
+    for (const symbol of CC_SYMBOL_LIST) {
+      Backtest.background(symbol, {
+        exchangeName: exchangeSchema.exchangeName,
+        strategyName: strategySchema.strategyName,
+        frameName: frameSchema.frameName,
+      });
+    }
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  All three schemas — strategy, exchange, and frame — must be registered before the runner starts. The `backtest.ts` entry point calls `listStrategySchema()`, `listExchangeSchema()`, and `listFrameSchema()` and throws if any is missing. Register them all inside the strategy file and its companion `modules/backtest.module.ts`.
+</Note>
+
+## Interval Selection Guide
+
+<Tabs>
+  <Tab title="Development">
+    ```typescript
+    addFrameSchema({
+      frameName: "dev_frame",
+      interval: "1m",
+      startDate: new Date("2026-04-01T00:00:00Z"),
+      endDate: new Date("2026-04-03T00:00:00Z"), // 2 days
+    });
+    ```
+    2 days × 1m = **2,880 candles/symbol** — fast iteration, immediate feedback on logic changes.
+  </Tab>
+  <Tab title="Staging">
+    ```typescript
+    addFrameSchema({
+      frameName: "staging_frame",
+      interval: "1m",
+      startDate: new Date("2026-04-01T00:00:00Z"),
+      endDate: new Date("2026-04-08T00:00:00Z"), // 1 week
+    });
+    ```
+    7 days × 1m = **10,080 candles/symbol** — covers a full weekly cycle including weekend volatility.
+  </Tab>
+  <Tab title="Production">
+    ```typescript
+    addFrameSchema({
+      frameName: "apr_2026_frame",
+      interval: "1m",
+      startDate: new Date("2026-04-01T00:00:00Z"),
+      endDate: new Date("2026-04-27T00:00:00Z"), // 27 days
+    });
+    ```
+    27 days × 1m = **38,880 candles/symbol** × 9 symbols = **~350,000 total ticks**.
+  </Tab>
+</Tabs>

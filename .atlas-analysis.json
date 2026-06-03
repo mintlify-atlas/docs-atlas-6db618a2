@@ -1,0 +1,126 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "backtest-monorepo-parallel",
+  "projectDescription": "A TypeScript monorepo template for backtest-kit that runs 9 crypto symbols in parallel within a single Node.js process, featuring a zero-import dependency injection runtime, MongoDB persistence, and Redis caching for ~6300× real-time backtesting speed.",
+  "theme": "aspen",
+  "primaryColor": "#6366F1",
+  "lightColor": "#818CF8",
+  "darkColor": "#4338CA",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Running Backtests",
+            "pages": [
+              "guides/modes",
+              "guides/parallel-runner",
+              "guides/single-strategy",
+              "guides/caching"
+            ]
+          },
+          {
+            "group": "Writing Strategies",
+            "pages": [
+              "guides/strategy-anatomy",
+              "guides/exchange-schema",
+              "guides/frame-schema",
+              "guides/signal-events"
+            ]
+          },
+          {
+            "group": "Extending the Monorepo",
+            "pages": [
+              "guides/adding-services",
+              "guides/adding-collections",
+              "guides/adding-redis-cache",
+              "guides/adding-entry-points"
+            ]
+          },
+          {
+            "group": "Infrastructure & Config",
+            "pages": [
+              "guides/infrastructure",
+              "guides/persistence-config",
+              "guides/environment-variables"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core Package (@pro/core)",
+            "pages": [
+              "api/ioc-container",
+              "api/base-crud",
+              "api/base-map",
+              "api/services"
+            ]
+          },
+          {
+            "group": "Main Package (@pro/main)",
+            "pages": [
+              "api/entry-points",
+              "api/cli-flags",
+              "api/config-files"
+            ]
+          },
+          {
+            "group": "Data Models & Schemas",
+            "pages": [
+              "api/candle-schema",
+              "api/signal-models",
+              "api/parse-format"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "~6300× real-time aggregate backtesting speed across 9 crypto symbols in a single Node.js process",
+    "Zero-import DI runtime via globalThis.core — strategy files access services without any import statements",
+    "Parallel Backtest.background() execution sharing one event loop, one MongoDB connection pool, and one Redis pool",
+    "Redis O(1) lookup cache via BaseMap with configurable TTL, backed by ioredis",
+    "Atomic MongoDB upserts via BaseCRUD.findOneAndUpdate — no read-modify-write, no E11000 retries",
+    "Per-subsystem persistence adapters (live vs. backtest) configured in a single setup.config.ts",
+    "--cache flag pre-warms all symbol candles into MongoDB before the hot loop starts",
+    "Telegram MTProto scraper + regex-based signal parser for crypto trading signal channels",
+    "Rollup-based build per package emitting CJS bundles and rolled-up .d.ts type files",
+    "Four runtime modes: backtest, live, paper, and session (Telegram auth)"
+  ],
+  "publicApiSurface": [
+    "ioc — global DI container (globalThis.core) with loggerService, candleDbService, scraperService, parserService, cryptoYodaScreenService",
+    "BaseCRUD(Model) — factory class providing create, update, findById, findByFilter, findAll, iterate, paginate",
+    "BaseMap(connectionKey, ttlExpireSeconds) — Redis-backed map with set, get, delete, has, clear, toArray, iterate, keys, values, size",
+    "provide(TYPES.token, factory) — DI registration from di-kit createActivator('pro')",
+    "inject<T>(TYPES.token) — DI resolution",
+    "init() — initializes the DI container",
+    "LoggerService — log, debug, info, warn, setLogger",
+    "ScraperService.scrapeDay(channel, date) — fetches Telegram channel messages for a given day",
+    "ParserService.parseDay(messages, format) — extracts structured data from scraped messages using regex field mappings",
+    "CryptoYodaScreenService.screenDay(date) / parseDay(scraperList) — end-to-end signal extraction from CryptoYoda channel",
+    "CandleDbService.create(dto) / hasCandle(symbol, interval, timestamp) / findBySymbolIntervalTimestamp(...)",
+    "Backtest.background(symbol, { exchangeName, strategyName, frameName }) — non-blocking parallel backtest runner",
+    "Live.background(symbol, { exchangeName, strategyName }) — non-blocking live/paper trading runner",
+    "getArgs() — parses CLI flags: --entry, --backtest, --live, --paper, --session, --cache",
+    "CC_SYMBOL_LIST — comma-separated list of symbols for the parallel runner (env configurable)",
+    "addStrategySchema({ strategyName, getSignal }) — registers a strategy with backtest-kit",
+    "addExchangeSchema({ exchangeName, getCandles, getOrderBook, ... }) — registers an exchange adapter",
+    "addFrameSchema({ frameName, interval, startDate, endDate }) — registers a backtest time frame",
+    "listenActivePing(callback) — event hook called on every active position tick",
+    "listenError(callback) — global error handler hook",
+    "setup() — configures @backtest-kit/mongo persistence adapters"
+  ]
+}

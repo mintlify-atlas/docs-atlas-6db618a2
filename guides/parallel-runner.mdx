@@ -1,0 +1,195 @@
+---
+title: "Running 9 Symbols in Parallel with Backtest.background()"
+sidebarTitle: "Parallel Runner"
+description: "Mode A deep-dive: CC_SYMBOL_LIST drives Backtest.background() per symbol concurrently in one Node process — no IPC, shared Mongo, shared Redis pool."
+---
+
+Mode A is the monorepo's flagship execution path: a single Node.js process that backtests all nine symbols in `CC_SYMBOL_LIST` concurrently, sharing one MongoDB connection pool and one Redis client, with no IPC, no subprocess forks, and no per-symbol startup overhead. The result is a measured aggregate replay speed of **~6 326× real-time** — 297 strategy events across 9 symbols in 2.9 seconds on commodity developer hardware — achievable because every `Backtest.background()` call is non-blocking and the hot loop is pure CPU plus local I/O against a pre-warmed cache.
+
+## The Mode A Command
+
+```bash
+npm run start -- --backtest --entry --ui --cache \
+  ./content/apr_2026.strategy/apr_2026.strategy.ts
+```
+
+### Flag Reference
+
+| Flag | Type | Purpose |
+|---|---|---|
+| `--backtest` | boolean | Activates the second guard in `backtest.ts` — without it the file is a no-op |
+| `--entry` | boolean | Activates the first guard — distinguishes Mode A from Mode B |
+| `--ui` | boolean | Starts the `@backtest-kit/ui` web interface on `:60050` (consumed by the CLI) |
+| `--cache` | boolean | Triggers `CACHE_CANDLES_FN` before the runners start, pre-populating MongoDB with OHLCV candles |
+
+<Note>
+  The `--entry` flag is the single switch that separates Mode A from Mode B. Without `--entry`, `backtest.ts` returns on its very first guard and the `@backtest-kit/cli` single-strategy runner takes over.
+</Note>
+
+## Source: `packages/main/src/main/backtest.ts`
+
+The full entry-point file is concise by design. Every concern — schema validation, caching, and symbol iteration — is expressed in fewer than 60 lines:
+
+```typescript
+import { CC_SYMBOL_LIST } from "../config/params";
+import { getArgs } from "../helpers/getArgs";
+import {
+  Backtest,
+  waitForReady,
+  listStrategySchema,
+  listExchangeSchema,
+  listFrameSchema,
+  cacheCandles,
+} from "backtest-kit";
+
+const CACHE_CANDLES_FN = async () => {
+  const [exchangeSchema] = await listExchangeSchema();
+  const [frameSchema] = await listFrameSchema();
+  for (const symbol of CC_SYMBOL_LIST) {
+    await cacheCandles({
+      exchangeName: exchangeSchema.exchangeName,
+      from: frameSchema.startDate,
+      to: frameSchema.endDate,
+      interval: "1m",
+      symbol,
+    });
+  }
+};
+
+const main = async () => {
+  const { values } = getArgs();
+
+  if (!values.entry) {
+    return;
+  }
+
+  if (!values.backtest) {
+    return;
+  }
+
+  await waitForReady(true);
+
+  const [strategySchema] = await listStrategySchema();
+
+  if (!strategySchema) {
+    throw new Error("Strategy not specified");
+  }
+
+  const [exchangeSchema] = await listExchangeSchema();
+
+  if (!exchangeSchema) {
+    throw new Error("Exchange not specified");
+  }
+
+  const [frameSchema] = await listFrameSchema();
+
+  if (!frameSchema) {
+    throw new Error("Frame not specified");
+  }
+
+  if (values.cache) {
+    await CACHE_CANDLES_FN();
+  }
+
+  for (const symbol of CC_SYMBOL_LIST) {
+    Backtest.background(symbol, {
+      exchangeName: exchangeSchema.exchangeName,
+      strategyName: strategySchema.strategyName,
+      frameName: frameSchema.frameName,
+    });
+  }
+};
+
+main();
+```
+
+## `CC_SYMBOL_LIST` — Default Symbols and Customisation
+
+The symbol list is parsed from the `CC_SYMBOL_LIST` environment variable at startup. If the variable is not set, the module falls back to a hard-coded comma-separated default:
+
+```typescript
+// packages/main/src/config/params.ts
+function parseSymbolList(envVar: string, fallback: string) {
+  const originList = process.env[envVar] || fallback;
+  return originList
+    .split(",")
+    .map((s) => s.trim());
+}
+
+export const CC_SYMBOL_LIST = parseSymbolList(
+  "CC_SYMBOL_LIST",
+  "BTCUSDT,POLUSDT,ZECUSDT,HYPEUSDT,XAUTUSDT,DOGEUSDT,SOLUSDT,PENGUUSDT,HBARUSDT"
+);
+```
+
+The default list is:
+
+```
+BTCUSDT, POLUSDT, ZECUSDT, HYPEUSDT, XAUTUSDT, DOGEUSDT, SOLUSDT, PENGUUSDT, HBARUSDT
+```
+
+To override it for a single run, set the environment variable before the command:
+
+```bash
+CC_SYMBOL_LIST="BTCUSDT,SOLUSDT" npm run start -- --backtest --entry --ui --cache \
+  ./content/apr_2026.strategy/apr_2026.strategy.ts
+```
+
+## Execution Flow
+
+<Steps>
+  <Step title="Guards evaluated">
+    `getArgs()` parses `process.argv` once (memoised via `singleshot`). If either `--entry` or `--backtest` is absent, `main()` returns immediately and the process continues with the `@backtest-kit/cli` runner.
+  </Step>
+  <Step title="waitForReady(true)">
+    `waitForReady(true)` blocks until all registered schemas (strategy, exchange, frame) have finished initialising their DI bindings and MongoDB connections. The `true` argument signals that backtest-specific schemas — including the frame/time-window schema — must be present.
+  </Step>
+  <Step title="Schema validation">
+    `listStrategySchema()`, `listExchangeSchema()`, and `listFrameSchema()` each return the first registered schema of their type. If any is missing, `main()` throws with a descriptive error rather than silently producing empty results.
+  </Step>
+  <Step title="Optional cache pre-warm">
+    If `--cache` is set, `CACHE_CANDLES_FN()` runs sequentially over every symbol in `CC_SYMBOL_LIST`, calling `cacheCandles()` with the exchange name, start date, end date, and `1m` interval. This is an `await`ed loop — it completes fully before any runner starts.
+  </Step>
+  <Step title="Backtest.background() launched for all symbols">
+    The `for` loop calls `Backtest.background(symbol, options)` for each symbol. Each call is **fire-and-forget** — it does not `await` anything, so all nine contexts begin executing concurrently on the same event loop before the loop has finished iterating.
+  </Step>
+</Steps>
+
+## Why Single-Process?
+
+Running all nine symbols in one process rather than spawning nine child processes delivers three concrete advantages:
+
+<CardGroup cols={3}>
+  <Card title="No IPC overhead" icon="arrows-left-right">
+    All contexts share the same heap and event loop. Results, intermediate state, and log output never need to be serialised and sent across a process boundary.
+  </Card>
+  <Card title="Shared Mongo pool" icon="database">
+    A single `mongoose` connection pool handles all concurrent writes. No per-symbol connection setup, no port exhaustion, no `ECONNREFUSED` under high parallelism.
+  </Card>
+  <Card title="Shared Redis pool" icon="bolt">
+    `BaseMap` lookups from all nine symbol contexts hit the same `ioredis` client. Cache entries from one symbol context can be reused by another if they share the same key.
+  </Card>
+</CardGroup>
+
+## `waitForReady(true)` Explained
+
+`waitForReady` is a `backtest-kit` utility that waits for the framework's internal DI container to signal readiness. Passing `true` means the call also waits for the frame schema to be registered — which happens when the strategy file is evaluated by `@backtest-kit/cli`. Without this await, `listStrategySchema()` would return an empty array because the strategy file may not have finished executing its top-level `addStrategySchema()` call.
+
+## Measured Performance
+
+Benchmarked on a **HP Victus 15-FA1022CI** (Intel Core i5-13420H, 16 GB DDR4-3200, NVMe SSD) with Mongo + Redis running locally via `docker-compose`:
+
+| Metric | Value |
+|---|---|
+| Wall-clock span (first → last event) | **2 893 ms** (~2.9 s) |
+| Total events captured | **297** |
+| Symbols running in parallel | **9** |
+| Historical time advanced per symbol | **34 minutes** of 1m candles |
+| Per-symbol replay speed | ≈ **703×** real-time |
+| Aggregate replay speed (9 symbols) | ≈ **6 326×** real-time |
+| Event throughput | ≈ **103 events/sec** |
+| Frame coverage | `2026-04-01 → 2026-04-27` (27 days × 38 880 candles/symbol × 9 = ~350 000 candle ticks) |
+
+<Tip>
+  Always pass `--cache` on first run or after a gap in your candle data. Without it, every candle tick that is not already in MongoDB triggers a live ccxt HTTP fetch, which adds network round-trip latency to the hot loop and can reduce replay speed by an order of magnitude.
+</Tip>

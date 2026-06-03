@@ -1,0 +1,144 @@
+---
+title: "Backtest, Live, Paper, and Session Modes Overview"
+sidebarTitle: "Modes"
+description: "Compare all four runtime modes — backtest, live, paper, and session — and understand which CLI flags and source files govern each execution path."
+---
+
+The monorepo exposes four distinct runtime modes — **backtest**, **live**, **paper**, and **session** — each activated by a corresponding CLI flag. Every mode is implemented as a standalone `main()` function in `packages/main/src/main/`, and each file uses a guard pattern to early-return if its own flag is not present. This means all four entry points are always imported, but only the one whose flag is set actually runs. The `--entry` flag acts as a secondary gate inside both `backtest.ts` and `live.ts` / `paper.ts`, distinguishing the parallel multi-symbol runner from the single-symbol `@backtest-kit/cli` path.
+
+## Mode Comparison
+
+| Mode | Required flags | Entry point file | What it does | Persistence adapters |
+|---|---|---|---|---|
+| **Backtest A** (parallel) | `--backtest --entry` | `packages/main/src/main/backtest.ts` | Iterates `CC_SYMBOL_LIST`, calls `Backtest.background()` for each symbol concurrently | Memory / Local file (fast replay) |
+| **Backtest B** (single) | `--backtest` (no `--entry`) | `@backtest-kit/cli` internal runner | `backtest.ts` early-returns; CLI loads strategy file directly and runs one symbol | Memory / Local file |
+| **Live** | `--live --entry` | `packages/main/src/main/live.ts` | Calls `Live.background()` for each symbol in `CC_SYMBOL_LIST` against a real exchange | Mongo (durable persistence) |
+| **Paper** | `--paper --entry` | `packages/main/src/main/paper.ts` | Same as live but with simulated fills — no real orders sent | Mongo (durable persistence) |
+| **Session** | `--session` | `packages/main/src/main/session.ts` | Starts Telegram QR-code auth flow, writes `session.txt` | None (file write only) |
+
+## The Gate Pattern
+
+Each file in `packages/main/src/main/` uses an identical double-guard structure. The function returns immediately unless both the mode flag and (where applicable) `--entry` are set:
+
+```typescript
+// packages/main/src/main/backtest.ts
+const main = async () => {
+  const { values } = getArgs();
+
+  if (!values.entry) {
+    return;
+  }
+
+  if (!values.backtest) {
+    return;
+  }
+
+  // ... rest of Mode A logic
+};
+```
+
+```typescript
+// packages/main/src/main/session.ts
+const main = async () => {
+  const { values } = getArgs();
+
+  if (!values.session) {
+    return;
+  }
+
+  // ... Telegram auth flow
+};
+```
+
+Because all four `main()` calls are imported at startup, only the guards determine which code path executes. There is no dynamic `require` or runtime branching on strings — the entire decision is made in the first few lines of each file.
+
+## How `getArgs()` Works
+
+`getArgs()` is a memoised wrapper (via `singleshot` from `functools-kit`) around Node's built-in `parseArgs` from the `util` module. It is called once and cached for the lifetime of the process:
+
+```typescript
+// packages/main/src/helpers/getArgs.ts
+import { singleshot } from "functools-kit";
+import { parseArgs } from "util";
+
+export const getArgs = singleshot(() => {
+  const { values } = parseArgs({
+    args: process.argv,
+    options: {
+      entry: { type: "boolean", default: false },
+      backtest: { type: "boolean", default: false },
+      live: { type: "boolean", default: false },
+      paper: { type: "boolean", default: false },
+      session: { type: "boolean", default: false },
+      cache: { type: "boolean", default: false },
+    },
+    strict: false,
+    allowPositionals: true,
+  });
+  return { values };
+});
+```
+
+`strict: false` lets unknown flags (such as `--ui` and `--noCache` consumed by `@backtest-kit/cli`) pass through without throwing. `allowPositionals: true` lets the strategy file path appear as a bare positional argument at the end of the command.
+
+## Mode-by-Mode Details
+
+### Backtest Mode A — Parallel Runner
+
+When both `--backtest` and `--entry` are present, `backtest.ts` proceeds past its guards, waits for all DI and schema initialisation via `waitForReady(true)`, and then launches one `Backtest.background()` call per symbol in `CC_SYMBOL_LIST`. All calls are non-blocking; the nine contexts run concurrently inside a single Node event loop.
+
+### Backtest Mode B — Single-Strategy Runner
+
+When `--backtest` is present but `--entry` is absent, `backtest.ts` returns on the first guard (`if (!values.entry) return`). Control passes entirely to the `@backtest-kit/cli` bundled runner, which loads the strategy file supplied as the positional argument, registers its schemas, and backtests the single symbol declared inside the strategy.
+
+### Live Mode
+
+`live.ts` mirrors the backtest gate but checks `values.live`. It calls `waitForReady(false)` (live mode does not need to pre-initialise candle schemas) and then calls `Live.background()` for every symbol in `CC_SYMBOL_LIST`, connecting to a real exchange via ccxt.
+
+### Paper Mode
+
+`paper.ts` is structurally identical to `live.ts` but gates on `values.paper`. It calls the same `Live.background()` function with the same arguments — the distinction between real and simulated fills is handled inside `@backtest-kit` at the exchange adapter level, not in this file.
+
+### Session Mode
+
+`session.ts` is independent of `--entry`. It initialises a `TelegramClient` with `CC_TELEGRAM_API_ID` and `CC_TELEGRAM_API_HASH`, displays a QR code in the terminal, and on successful authentication writes the serialised `StringSession` to `./session.txt`. This file is consumed by live/paper strategies that send Telegram notifications.
+
+## Mode Command Examples
+
+<Tabs>
+  <Tab title="Backtest A (Parallel)">
+    ```bash
+    npm run start -- --backtest --entry --ui --cache \
+      ./content/apr_2026.strategy/apr_2026.strategy.ts
+    ```
+    Runs all 9 symbols in `CC_SYMBOL_LIST` concurrently. Use `--cache` to pre-warm MongoDB with OHLCV candles before the hot loop starts.
+  </Tab>
+  <Tab title="Backtest B (Single)">
+    ```bash
+    npm run start -- --backtest --ui --noCache \
+      ./content/apr_2026.strategy/apr_2026.strategy.ts
+    ```
+    No `--entry` flag — `backtest.ts` early-returns and `@backtest-kit/cli` runs a single-symbol backtest for whichever symbol the strategy file registers.
+  </Tab>
+  <Tab title="Live">
+    ```bash
+    npm run start -- --live --entry \
+      ./content/apr_2026.strategy/apr_2026.strategy.ts
+    ```
+    Connects to the real exchange. Ensure API credentials and a valid `session.txt` are present before running.
+  </Tab>
+  <Tab title="Paper">
+    ```bash
+    npm run start -- --paper --entry \
+      ./content/apr_2026.strategy/apr_2026.strategy.ts
+    ```
+    Same as live but fills are simulated. Safe to run without real exchange credentials.
+  </Tab>
+  <Tab title="Session">
+    ```bash
+    npm run start -- --session \
+      ./content/apr_2026.strategy/apr_2026.strategy.ts
+    ```
+    Opens a Telegram QR-code login prompt. Scan with the Telegram mobile app under **Settings → Devices → Link Desktop Device**. Writes `./session.txt` on success.
+  </Tab>
+</Tabs>

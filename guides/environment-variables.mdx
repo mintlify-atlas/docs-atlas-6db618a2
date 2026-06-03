@@ -1,7 +1,7 @@
 ---
-title: "Environment Variables Reference for backtest-monorepo-parallel"
+title: "Environment Variables Reference — backtest-monorepo"
 sidebarTitle: "Environment Variables"
-description: "Complete reference for all environment variables: MongoDB connection, Redis credentials, symbol list, and Telegram API credentials with defaults and usage context."
+description: "Full reference for all environment variables: MongoDB connection, Redis credentials, symbol list, and Telegram API credentials with defaults and usage."
 ---
 
 All runtime configuration is driven by environment variables with sensible defaults for local development — no mandatory `.env` file is required to run against a locally started Docker stack. To override any default, copy `.env.example` to `.env` at the repository root and edit the values you need. The `npm` scripts load `.env` automatically via `dotenv-cli` (e.g. `dotenv -e .env -- node ...`).

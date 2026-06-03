@@ -145,27 +145,19 @@ export class CandleDbService extends BaseCRUD(CandleModel) {
     return result;
   };
 
-  public hasCandle = async (
-    symbol: string,
-    interval: CandleInterval,
-    timestamp: number,
-  ): Promise<boolean> => {
-    this.loggerService.log("candleDbService hasCandle", { symbol, interval, timestamp });
-    const candle = await this.findBySymbolIntervalTimestamp(symbol, interval, timestamp);
-    return !!candle;
-  };
-
-  public findBySymbolIntervalTimestamp = async (
-    symbol: string,
-    interval: CandleInterval,
-    timestamp: number,
-  ): Promise<ICandleRow | null> => {
-    this.loggerService.log("candleDbService findBySymbolIntervalTimestamp", {
+  public hasCandle = async (symbol: string, interval: CandleInterval, timestamp: number): Promise<boolean> => {
+    this.loggerService.log("candleDbService hasCandle", { 
       symbol,
       interval,
       timestamp,
     });
-    return await super.findByFilter({ symbol, interval, exchangeName: EXCHANGE_NAME, timestamp });
+    const candle = await this.findBySymbolIntervalTimestamp(symbol, interval, timestamp);
+    return !!candle;
+  };
+
+  public findBySymbolIntervalTimestamp = async (symbol: string, interval: CandleInterval, timestamp: number): Promise<ICandleRow | null> => {
+    this.loggerService.log("candleDbService findBySymbolIntervalTimestamp", { symbol, interval, timestamp });
+    return await await super.findByFilter({ symbol, interval, exchangeName: EXCHANGE_NAME, timestamp });
   };
 }
 

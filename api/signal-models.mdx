@@ -1,10 +1,10 @@
 ---
-title: "ScraperMessage and Signal Data Models"
+title: "ScraperMessage, ParserMessage, and SignalEntry Models"
 sidebarTitle: "Signal Models"
-description: "TypeScript interfaces for ScraperMessage, ParserMessageRaw, and the SignalEntry model used by the CryptoYoda screener and parser pipeline."
+description: "TypeScript interfaces for ScraperMessage, ParserMessageRaw, ParserMessageSuccess, and SignalEntryModel used by the CryptoYoda scraper/parser pipeline."
 ---
 
-The scraper/parser pipeline is typed through three model interfaces. `ScraperMessage` represents a raw Telegram message as fetched by `ScraperService`. `ParserMessageRaw<M>` wraps a `ScraperMessage` with a typed `data` field containing fields extracted by `ParserService`. `SignalEntryModel` is the fully-structured signal produced when `CryptoYodaScreenService` applies the `SIGNAL_FORMAT` parse format to a day's messages.
+The scraper/parser pipeline is typed through three model files. `ScraperMessage` represents a raw Telegram message as fetched by `ScraperService`. `ParserMessageRaw<M>` and `ParserMessageSuccess<M>` wrap a `ScraperMessage` with a typed `data` field containing fields extracted by `ParserService`. `SignalEntryModel` defines the full shape of a CryptoYoda trade signal, including fields that are populated outside the parser (such as `publishedAt` and `note`).
 
 ---
 
@@ -42,7 +42,7 @@ export interface ScraperMessage {
 
 ## ParserMessageRaw\<M\>
 
-`ParserMessageRaw<M>` is the output of `ParserService.parseDay()`. It extends `ScraperMessage` with a `data` field that holds either the fully-extracted typed object or `null` when extraction failed.
+`ParserMessageRaw<M>` is the output of `ParserService.parseDay()`. It extends `ScraperMessage` with a `data` field that holds either the fully-extracted typed object or `null` when extraction failed. `ParserMessageSuccess<M>` is a narrowed variant where `data` is guaranteed non-null.
 
 ```typescript
 // packages/core/src/model/ParserMessage.model.ts
@@ -72,7 +72,7 @@ All other fields (`id`, `channel`, `content`, `date`) are inherited from `Scrape
 
 ## SignalEntryModel
 
-`SignalEntryModel` is the typed shape of a fully-parsed CryptoYoda trade signal. It is the concrete type bound for `M` when `CryptoYodaScreenService` calls `ParserService.parseDay(messages, SIGNAL_FORMAT)`.
+`SignalEntryModel` defines the complete shape of a structured CryptoYoda trade signal. It includes fields extracted by the parser (`symbol`, `direction`, `entry`, `targets`, `stoploss`) as well as fields populated outside the parser (`publishedAt`, `note`). Note that `CryptoYodaScreenService` parses against the local `SignalFields` type — `SignalEntryModel` is the broader contract for a fully-assembled signal record.
 
 ```typescript
 // packages/core/src/model/SignalEntry.model.ts
@@ -86,45 +86,53 @@ interface SignalEntryModel {
   note: string;
 }
 
-export { SignalEntryModel };
+export { SignalEntryModel }
 ```
 
 <ResponseField name="publishedAt" type="string">
-  ISO string representation of the signal publication time.
+  ISO string representation of the signal publication time. Populated outside the parser pipeline (not extracted from message text by `SIGNAL_FORMAT`).
 </ResponseField>
 
 <ResponseField name="symbol" type="string">
-  The trading pair symbol extracted from the message, e.g. `"BTCUSDT"`. Derived from the `#SYMBOL/USDT` hashtag pattern.
+  The trading pair symbol, e.g. `"BTCUSDT"`. Corresponds to the `symbol` field extracted by `SIGNAL_FORMAT` from the `#SYMBOL/USDT` hashtag pattern.
 </ResponseField>
 
 <ResponseField name="direction" type='"long" | "short"'>
-  Trade direction — `"long"` for ЛОНГ signals, `"short"` for ШОРТ signals.
+  Trade direction — `"long"` for ЛОНГ signals, `"short"` for ШОРТ signals. Corresponds to the `direction` field extracted by `SIGNAL_FORMAT`.
 </ResponseField>
 
 <ResponseField name="entry" type="{ from: number; to: number }">
-  The entry price zone as a `{ from, to }` range extracted from the message text. Both values are positive finite numbers with `from < to`.
+  The entry price zone as a `{ from, to }` range. Corresponds to the `entry` field extracted by `SIGNAL_FORMAT`. Both values are positive finite numbers with `from < to`.
 </ResponseField>
 
 <ResponseField name="targets" type="number[]">
-  Array of take-profit price targets extracted with the `multi: true` pattern. At least one target is required for the message to parse successfully.
+  Array of take-profit price targets. Corresponds to the `targets` field extracted by `SIGNAL_FORMAT` using `multi: true`. At least one target is required for the message to parse successfully.
 </ResponseField>
 
 <ResponseField name="stoploss" type="number">
-  Stop-loss price level extracted from the `СТОП-ЛОСС:` line. Must be a positive finite number.
+  Stop-loss price level. Corresponds to the `stoploss` field extracted by `SIGNAL_FORMAT` from the `СТОП-ЛОСС:` line.
 </ResponseField>
 
 <ResponseField name="note" type="string">
-  Optional free-text note attached to the signal (not extracted by the parser — populated downstream).
+  Free-text note attached to the signal. Not extracted by the parser — populated downstream after the pipeline returns.
 </ResponseField>
 
 ---
 
 ## Pipeline Flow
 
-The three interfaces connect in a linear pipeline inside `CryptoYodaScreenService`:
+The scraper and parser interfaces connect in a linear pipeline inside `CryptoYodaScreenService`. The parser operates over the local `SignalFields` type (a subset of `SignalEntryModel`), not over `SignalEntryModel` itself.
 
 ```typescript
 // packages/core/src/lib/services/screen/CryptoYodaScreenService.ts (simplified)
+
+type SignalFields = {
+  symbol: string;
+  direction: "short" | "long";
+  entry: { from: number; to: number };
+  targets: number[];
+  stoploss: number;
+};
 
 // Step 1 — fetch raw Telegram messages for a given day
 const scraperList: ScraperMessage[] = await scraperService.scrapeDay(

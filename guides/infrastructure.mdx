@@ -1,5 +1,5 @@
 ---
-title: "Setting Up MongoDB and Redis Infrastructure"
+title: "MongoDB and Redis Infrastructure Setup for Backtesting"
 sidebarTitle: "Infrastructure"
 description: "Launch the MongoDB 8 and Redis 7 Docker services bundled with the monorepo, configure ports and volumes, and verify connectivity before running backtests."
 ---
@@ -146,7 +146,7 @@ Once infrastructure is running, build the monorepo packages before starting any 
     npm run build:win      # Windows       → delegates to scripts/win/build.bat
     ```
 
-    Both scripts do the same thing: walk every directory under `packages/`, enter each one, and run `npm run build` inside it (which invokes `rollup -c`):
+    Both scripts walk every directory under `packages/`, enter each one, and run `npm run build` inside it (which invokes `rollup -c`). The Linux script also runs `npm install` in each package directory before building; the Windows script skips the per-package install and assumes dependencies are already satisfied by the root `npm install`:
 
     ```bash
     # scripts/linux/build.sh (simplified)

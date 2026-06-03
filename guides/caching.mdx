@@ -69,19 +69,21 @@ After `CandleDbService` has written candles to MongoDB, subsequent reads during 
 
 The Redis key is a plain string (no JSON parse on the hot path). TTL is `-1` (no expiry) for candle data, which is immutable once written.
 
-## `--cache` vs `--noCache`
+## `--cache` vs Omitting `--cache`
 
-| Scenario | Recommended flag | Reason |
+`--cache` is a boolean flag parsed by `getArgs()` in `packages/main/src/helpers/getArgs.ts`. There is no `--noCache` flag — to skip pre-warming, simply omit `--cache` from the command.
+
+| Scenario | Use `--cache`? | Reason |
 |---|---|---|
-| First run against a fresh MongoDB | `--cache` | Prevents ccxt HTTP latency from dominating replay time |
-| After adding new symbols to `CC_SYMBOL_LIST` | `--cache` | New symbols have no cached candles yet |
-| After extending the backtest date range | `--cache` | New candles for the extended window are not yet in MongoDB |
-| Benchmarking throughput | `--cache` | Ensures measured speed reflects the hot loop, not HTTP fetch overhead |
-| Testing candle fetch logic | `--noCache` | Forces every tick through the ccxt fetch path for debugging |
-| Working with the latest live data | `--noCache` | Fetches candles from the exchange in real time rather than reading a cached snapshot |
+| First run against a fresh MongoDB | ✅ Yes | Prevents ccxt HTTP latency from dominating replay time |
+| After adding new symbols to `CC_SYMBOL_LIST` | ✅ Yes | New symbols have no cached candles yet |
+| After extending the backtest date range | ✅ Yes | New candles for the extended window are not yet in MongoDB |
+| Benchmarking throughput | ✅ Yes | Ensures measured speed reflects the hot loop, not HTTP fetch overhead |
+| Testing candle fetch logic | ❌ No | Omit `--cache` to force every tick through the ccxt fetch path for debugging |
+| Working with the latest live data | ❌ No | Omit `--cache` to fetch candles from the exchange in real time |
 
 <Warning>
-  Running without `--cache` (or with `--noCache`) on a fresh MongoDB will trigger a live ccxt HTTP request for every candle tick that is not already in the database. Depending on exchange rate limits and network conditions, this can reduce replay speed from the measured ~6 326× aggregate down to single-digit or even sub-1× real-time. Always use `--cache` for benchmarking and production parallel runs.
+  Running without `--cache` on a fresh MongoDB will trigger a live ccxt HTTP request for every candle tick that is not already in the database. Depending on exchange rate limits and network conditions, this can reduce replay speed from the measured ~6 326× aggregate down to single-digit or even sub-1× real-time. Always use `--cache` for benchmarking and production parallel runs.
 </Warning>
 
 ## Persistence Adapter Matrix

@@ -1,7 +1,7 @@
 ---
-title: "Adding a New Runtime Mode to @pro/main"
+title: "Adding a New Execution Mode to the @pro/main Entry Point"
 sidebarTitle: "New Entry Points"
-description: "Create a custom execution mode in @pro/main by adding a CLI flag, a new mode file, and re-exporting it — all following the pattern of backtest.ts and live.ts."
+description: "Create a custom execution mode in @pro/main by adding a CLI flag, a new mode file, and re-exporting it — following the gate pattern used by backtest.ts."
 ---
 
 `@pro/main` is the entry point hub for the monorepo. Each runtime mode — `backtest`, `live`, `paper`, `session` — is a self-contained file that gates on a specific CLI flag and early-returns if that flag is absent. Adding a new mode means adding one flag, one file, and one re-export: the Rollup config picks everything up automatically via the `index.ts` entry point.

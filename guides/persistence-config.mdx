@@ -1,7 +1,7 @@
 ---
-title: "Configuring Per-Subsystem Persistence Adapters"
+title: "Per-Subsystem Persistence Adapter Configuration Guide"
 sidebarTitle: "Persistence"
-description: "Configure which storage adapter each backtest-kit subsystem uses in config/setup.config.ts — swap between MongoDB, local file, and in-memory adapters per mode."
+description: "Configure storage adapters per backtest-kit subsystem in setup.config.ts — swap between MongoDB, local file, and in-memory backends per run mode."
 ---
 
 `config/setup.config.ts` is the single file that wires all persistence adapters for the entire monorepo. Every backtest-kit subsystem has two adapter slots — one for **Live** mode and one for **Backtest** mode — and this file makes exactly one call per slot. Changing a subsystem's storage backend for either mode is a one-line edit here; no other file needs to change.

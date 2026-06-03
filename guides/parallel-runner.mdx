@@ -15,12 +15,12 @@ npm run start -- --backtest --entry --ui --cache \
 
 ### Flag Reference
 
-| Flag | Type | Purpose |
+| Flag | Parsed by | Purpose |
 |---|---|---|
-| `--backtest` | boolean | Activates the second guard in `backtest.ts` — without it the file is a no-op |
-| `--entry` | boolean | Activates the first guard — distinguishes Mode A from Mode B |
-| `--ui` | boolean | Starts the `@backtest-kit/ui` web interface on `:60050` (consumed by the CLI) |
-| `--cache` | boolean | Triggers `CACHE_CANDLES_FN` before the runners start, pre-populating MongoDB with OHLCV candles |
+| `--backtest` | `getArgs()` | Activates the second guard in `backtest.ts` — without it the file is a no-op |
+| `--entry` | `getArgs()` | Activates the first guard — distinguishes Mode A from Mode B |
+| `--cache` | `getArgs()` | Triggers `CACHE_CANDLES_FN` before the runners start, pre-populating MongoDB with OHLCV candles |
+| `--ui` | `@backtest-kit/cli` | Starts the `@backtest-kit/ui` web interface on `:60050` — forwarded to the CLI runner, not parsed by `getArgs()` |
 
 <Note>
   The `--entry` flag is the single switch that separates Mode A from Mode B. Without `--entry`, `backtest.ts` returns on its very first guard and the `@backtest-kit/cli` single-strategy runner takes over.

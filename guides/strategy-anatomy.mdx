@@ -1,5 +1,5 @@
 ---
-title: "Anatomy of a backtest-kit Strategy File"
+title: "Anatomy of a backtest-kit Strategy: Files and Hooks"
 sidebarTitle: "Strategy Anatomy"
 description: "Break down a complete strategy file: addStrategySchema, the getSignal callback, listenActivePing hooks, position laddering, and error handling patterns."
 ---
@@ -256,6 +256,9 @@ import {
   Position,
   commitClosePending,
   getPositionPnlPercent,
+  getPositionEntryOverlap,
+  getPositionEntries,
+  commitAverageBuy,
 } from "backtest-kit";
 import { errorData, getErrorMessage, str } from "functools-kit";
 

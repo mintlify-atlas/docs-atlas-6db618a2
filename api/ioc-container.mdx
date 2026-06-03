@@ -1,5 +1,5 @@
 ---
-title: "@pro/core IoC Container and globalThis.core API"
+title: "@pro/core IoC Container, TYPES Tokens, and globalThis.core"
 sidebarTitle: "IoC Container"
 description: "Reference for the @pro/core DI container: provide(), inject(), init(), the TYPES token map, and the globally-accessible ioc object on globalThis.core."
 ---
@@ -55,7 +55,7 @@ init(): void
 Triggers eager initialization of all registered providers, ensuring every factory has been invoked and every singleton is live before any consumer code runs.
 
 <Note>
-  `init()` is called automatically at module load time via the `import './core/provide'` side effect in `packages/core/src/lib/index.ts`. You do not need to call it manually.
+  `init()` is called automatically at the bottom of `packages/core/src/lib/index.ts`, after all `inject()` calls have registered the service references. You do not need to call it manually.
 </Note>
 
 ---

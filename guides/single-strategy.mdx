@@ -9,7 +9,7 @@ Mode B is the single-symbol execution path, activated by passing `--backtest` wi
 ## The Mode B Command
 
 ```bash
-npm run start -- --backtest --ui --noCache \
+npm run start -- --backtest \
   ./content/apr_2026.strategy/apr_2026.strategy.ts
 ```
 
@@ -17,14 +17,13 @@ Notice the absence of `--entry`. This is the only difference from the Mode A com
 
 ### Flag Reference
 
-| Flag | Type | Purpose |
+| Flag | Parsed by | Purpose |
 |---|---|---|
-| `--backtest` | boolean | Tells `@backtest-kit/cli` to run in backtest mode |
-| `--ui` | boolean | Starts the `@backtest-kit/ui` web interface on `:60050` |
-| `--noCache` | boolean | Candles are fetched live from ccxt on each tick rather than read from MongoDB |
+| `--backtest` | `getArgs()` | Activates the second guard in `backtest.ts`; without `--entry` the file early-returns, leaving `@backtest-kit/cli` in control |
+| `--ui` | `@backtest-kit/cli` | Starts the `@backtest-kit/ui` web interface on `:60050` — forwarded to the CLI runner, not parsed by `getArgs()` |
 
 <Note>
-  `--noCache` means candles are fetched live from ccxt on each tick — useful for testing fetch logic or working with the very latest data, but noticeably slower for benchmarking than the pre-warmed `--cache` path.
+  `--ui` and other `@backtest-kit/cli` flags are **not** parsed by `getArgs()` in `packages/main/src/helpers/getArgs.ts`. They are passed through to the CLI runner via `strict: false` / `allowPositionals: true` in `parseArgs`. To omit the UI, simply leave `--ui` out of the command — there is no `--noCache` flag defined in `getArgs()`.
 </Note>
 
 ## How Mode B Differs from Mode A
@@ -98,10 +97,10 @@ The sibling `modules/backtest.module.ts` file in the strategy directory is where
   </Step>
   <Step title="Run Mode B for rapid iteration">
     ```bash
-    npm run start -- --backtest --ui --noCache \
+    npm run start -- --backtest \
       ./content/<name>.strategy/<name>.strategy.ts
     ```
-    Inspect results in the `@backtest-kit/ui` dashboard at `http://localhost:60050`. Adjust strategy parameters and re-run.
+    Inspect results in the `@backtest-kit/ui` dashboard at `http://localhost:60050` (add `--ui` to open the web UI). Adjust strategy parameters and re-run.
   </Step>
   <Step title="Switch to Mode A for full portfolio validation">
     ```bash

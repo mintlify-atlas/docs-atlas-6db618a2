@@ -1,7 +1,7 @@
 ---
-title: "Adding a New Service to @pro/core"
+title: "Registering a New Service in the @pro/core DI Container"
 sidebarTitle: "New Services"
-description: "Extend the @pro/core package with a new injectable service in five steps: create the class, register a symbol, provide a factory, expose on ioc, and rebuild."
+description: "Add an injectable service to @pro/core in five steps: create the class, register a DI symbol, provide a factory, expose on ioc, and rebuild."
 ---
 
 The DI system in `@pro/core` uses symbol-keyed tokens managed by `di-kit`'s `createActivator("pro")`. Adding a service is a deterministic five-step recipe that touches exactly four files in `packages/core/` — no content files under `./content/` ever need to change, because `globalThis.core` is a typed reference to the `ioc` object and gains the new service automatically once `ioc` is updated and the package is rebuilt.
@@ -25,15 +25,24 @@ The DI system in `@pro/core` uses symbol-keyed tokens managed by `di-kit`'s `cre
     import ParserService from "../core/ParserService";
     import ScraperService from "../core/ScraperService";
 
+    const CHANNEL_NAME = "crypto_yoda_channel";
+
     export class CryptoYodaScreenService {
       private readonly loggerService = inject<LoggerService>(TYPES.loggerService);
       private readonly parserService = inject<ParserService>(TYPES.parserService);
       private readonly scraperService = inject<ScraperService>(TYPES.scraperService);
 
+      public parseDay = async (scraperList: ScraperMessage[]) => {
+        this.loggerService.log("cryptoYodaScreenService screenDay", {
+          scraperListLen: scraperList.length,
+        });
+        return await this.parserService.parseDay(scraperList, SIGNAL_FORMAT);
+      };
+
       public screenDay = async (date: Date) => {
         this.loggerService.log("cryptoYodaScreenService screenDay", { date });
-        const scraperList = await this.scraperService.scrapeDay("crypto_yoda_channel", date);
-        return await this.parserService.parseDay(scraperList, {});
+        const scraperList = await this.scraperService.scrapeDay(CHANNEL_NAME, date);
+        return await this.parseDay(scraperList);
       };
     }
 

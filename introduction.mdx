@@ -1,5 +1,5 @@
 ---
-title: "backtest-monorepo-parallel: Parallel Crypto Backtesting Template"
+title: "backtest-monorepo-parallel: Parallel Crypto Backtesting"
 sidebarTitle: "Introduction"
 description: "Learn what backtest-monorepo-parallel is, how it achieves 6300× real-time speed, and the core concepts behind its zero-import DI runtime."
 ---
@@ -67,8 +67,8 @@ The monorepo contains two npm workspace packages under `./packages/`:
 | Mode | Flag | Description |
 |---|---|---|
 | `backtest` | `--backtest --entry` | Parallel replay across all symbols in `CC_SYMBOL_LIST` |
-| `live` | `--live` | Live trading mode with Mongo-durable state |
-| `paper` | `--paper` | Paper trading mode |
+| `live` | `--live --entry` | Live trading mode with Mongo-durable state |
+| `paper` | `--paper --entry` | Paper trading mode |
 | `session` | `--session` | Telegram MTProto session initialisation via QR scan |
 
 ## The Four Runtime Modes

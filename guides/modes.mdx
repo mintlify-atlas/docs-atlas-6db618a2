@@ -79,7 +79,7 @@ export const getArgs = singleshot(() => {
 });
 ```
 
-`strict: false` lets unknown flags (such as `--ui` and `--noCache` consumed by `@backtest-kit/cli`) pass through without throwing. `allowPositionals: true` lets the strategy file path appear as a bare positional argument at the end of the command.
+`strict: false` lets unknown flags (such as `--ui`, consumed by `@backtest-kit/cli`) pass through without throwing — they are not parsed by `getArgs()` and do not appear in its `values` object. `allowPositionals: true` lets the strategy file path appear as a bare positional argument at the end of the command.
 
 ## Mode-by-Mode Details
 
@@ -115,10 +115,10 @@ When `--backtest` is present but `--entry` is absent, `backtest.ts` returns on t
   </Tab>
   <Tab title="Backtest B (Single)">
     ```bash
-    npm run start -- --backtest --ui --noCache \
+    npm run start -- --backtest \
       ./content/apr_2026.strategy/apr_2026.strategy.ts
     ```
-    No `--entry` flag — `backtest.ts` early-returns and `@backtest-kit/cli` runs a single-symbol backtest for whichever symbol the strategy file registers.
+    No `--entry` flag — `backtest.ts` early-returns and `@backtest-kit/cli` runs a single-symbol backtest for whichever symbol the strategy file registers. Any `@backtest-kit/cli`-specific flags (such as `--ui`) can be appended and are forwarded to the CLI runner; they are not parsed by `getArgs()`.
   </Tab>
   <Tab title="Live">
     ```bash

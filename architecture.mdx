@@ -93,7 +93,7 @@ backtest-monorepo-parallel/
     import "./main/paper";
     ```
 
-    Each mode module calls `getArgs()` on startup and early-returns if its flag is absent, so only one mode's logic runs per process invocation.
+    Each mode module calls `getArgs()` on startup and early-returns if its required flags are absent, so only one mode's logic runs per process invocation. The `backtest`, `live`, and `paper` modes each check for both `--entry` and their own mode flag (e.g. `--backtest`); `session` only checks `--session`.
 
     The parallel backtest mode (`backtest.ts`) is the most complex: it awaits `waitForReady(true)`, optionally calls `cacheCandles(...)` for all symbols, then fires `Backtest.background(symbol, { … })` for every entry in `CC_SYMBOL_LIST` — all in the same Node process.
   </Tab>
